@@ -877,6 +877,8 @@ def omx_local_info(repo_root: Path) -> Dict[str, Any]:
         "platform": None,
         "reasoning_effort": None,
         "team_api_available": False,
+        "team_api_event_query_available": False,
+        "team_api_monitor_snapshot_available": False,
         "notifications_configured": False,
     }
 
@@ -906,6 +908,10 @@ def omx_local_info(repo_root: Path) -> Dict[str, Any]:
         info["reasoning_effort"] = m_reasoning.group(1).strip()
     team_api_out = run_cmd(["omx", "team", "api", "--help"], cwd=Path.cwd(), check=False).stdout
     info["team_api_available"] = "get-summary" in team_api_out
+    info["team_api_event_query_available"] = "await-event" in team_api_out and "read-events" in team_api_out
+    info["team_api_monitor_snapshot_available"] = (
+        "read-monitor-snapshot" in team_api_out and "write-monitor-snapshot" in team_api_out
+    )
     info["notifications_configured"] = omx_notifications_configured(repo_root)
     return info
 
@@ -1130,6 +1136,8 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
         ]
     )
     installed = normalize_version(str(local.get("installed_version", "") or ""))
+    if installed and (not upstream_latest or compare_versions(installed, upstream_latest) > 0):
+        upstream_latest = installed
     update_available = bool(installed and upstream_latest and compare_versions(installed, upstream_latest) < 0)
 
     snapshot = {
@@ -1156,6 +1164,43 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
         "errors": errors,
     }
     return snapshot
+
+
+def omx_live_release_versions(snapshot: Dict[str, Any]) -> List[str]:
+    cache_fallback_used = {str(item) for item in snapshot.get("cache_fallback_used", []) if item}
+    versions: List[str] = []
+    if "github_latest" not in cache_fallback_used:
+        versions.append(normalize_version(str(snapshot.get("github_latest", {}).get("version", "") or "")))
+    if "npm_latest" not in cache_fallback_used:
+        versions.append(normalize_version(str(snapshot.get("npm_latest", {}).get("version", "") or "")))
+    return [item for item in versions if item]
+
+
+def omx_resolve_update_target(ctx: KernelAuditContext, requested_version: str) -> Tuple[str, Dict[str, Any]]:
+    target_version = normalize_version(str(requested_version or ""))
+    snapshot = omx_snapshot(ctx)
+    write_json(ctx.omx_upstream_path, snapshot)
+
+    if target_version and target_version != "latest":
+        return target_version, snapshot
+
+    live_versions = omx_live_release_versions(snapshot)
+    if live_versions:
+        return max_version(live_versions) or "latest", snapshot
+
+    cached = read_json(ctx.omx_upstream_path, {})
+    cached_target = normalize_version(
+        str(
+            cached.get("npm_latest", {}).get("version", "")
+            or cached.get("github_latest", {}).get("version", "")
+            or cached.get("upstream_latest", "")
+            or ""
+        )
+    )
+    installed = normalize_version(str(snapshot.get("installed", {}).get("installed_version", "") or ""))
+    if cached_target and installed and compare_versions(cached_target, installed) > 0:
+        return cached_target, snapshot
+    return "latest", snapshot
 
 
 def find_repo_root(start: Path) -> Path:
@@ -3558,6 +3603,38 @@ def team_api_call(
     return parse_json_output(res.stdout)
 
 
+def team_event_query_available(ctx: KernelAuditContext) -> bool:
+    return bool(omx_local_info(ctx.repo_root).get("team_api_event_query_available"))
+
+
+def team_await_event_via_api(
+    ctx: KernelAuditContext,
+    team_name: str,
+    after_event_id: Optional[str],
+    timeout_ms: int,
+    *,
+    poll_ms: int = 1000,
+) -> Optional[Dict[str, Any]]:
+    payload: Dict[str, Any] = {
+        "team_name": team_name,
+        "timeout_ms": max(0, int(timeout_ms)),
+        "poll_ms": max(50, int(poll_ms)),
+    }
+    if after_event_id:
+        payload["after_event_id"] = after_event_id
+    data = team_api_call(ctx, "await-event", payload)
+    if not data or data.get("ok") is not True:
+        return None
+    body = data.get("data", {})
+    if not isinstance(body, dict):
+        return None
+    return {
+        "status": str(body.get("status", "") or ""),
+        "cursor": str(body.get("cursor", "") or ""),
+        "event": body.get("event"),
+    }
+
+
 def team_summary_via_api(ctx: KernelAuditContext, team_name: str) -> Optional[Dict[str, Any]]:
     payload = {"team_name": team_name}
     data = team_api_call(ctx, "get-summary", payload)
@@ -3811,6 +3888,8 @@ def run_team_preflight(
     phase = "cancelled"
     aggressive_cleanup = False
     dead_worker_grace_deadline = started_at_epoch + 30
+    event_query_ok = team_event_query_available(ctx)
+    event_cursor: Optional[str] = None
     try:
         while True:
             st = team_summary_via_api(ctx, team_name)
@@ -3857,6 +3936,15 @@ def run_team_preflight(
                 phase = "timeout"
                 aggressive_cleanup = True
                 raise RuntimeError(f"omx team preflight timed out after {timeout}s (team={team_name})")
+            remaining_ms = int(max(0, (deadline - time.time()) * 1000))
+            wait_ms = min(remaining_ms, max(poll_interval, 2) * 1000)
+            if event_query_ok and wait_ms > 0:
+                awaited = team_await_event_via_api(ctx, team_name, event_cursor, wait_ms, poll_ms=min(wait_ms, 1000))
+                if awaited:
+                    cursor = str(awaited.get("cursor", "") or "")
+                    if cursor:
+                        event_cursor = cursor
+                    continue
             time.sleep(max(poll_interval, 2))
 
         if int(last_status.get("failed", 0)) > 0:
@@ -6398,6 +6486,8 @@ def print_omx_snapshot(snapshot: Dict[str, Any], limit: int = 5) -> None:
     print(f"- omx_bin: {installed.get('omx_bin')}")
     print(f"- install_root: {installed.get('install_root')}")
     print(f"- team_api_available: {installed.get('team_api_available')}")
+    print(f"- team_api_event_query_available: {installed.get('team_api_event_query_available')}")
+    print(f"- team_api_monitor_snapshot_available: {installed.get('team_api_monitor_snapshot_available')}")
     print(f"- notifications_configured: {installed.get('notifications_configured')}")
     print(f"- recommended_team_worker_launch_args: {snapshot.get('recommended_team_worker_launch_args')}")
 
@@ -6457,31 +6547,7 @@ def cmd_omx_status(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
 def cmd_omx_update(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     ctx.ensure_layout()
     ensure_default_files(ctx)
-
-    target_version = normalize_version(str(args.version or ""))
-    if not target_version or target_version == "latest":
-        cached = read_json(ctx.omx_upstream_path, {})
-        cached_target = normalize_version(
-            str(
-                cached.get("npm_latest", {}).get("version", "")
-                or cached.get("github_latest", {}).get("version", "")
-                or cached.get("upstream_latest", "")
-                or ""
-            )
-        )
-        if cached_target:
-            target_version = cached_target
-        else:
-            snapshot = omx_snapshot(ctx)
-            write_json(ctx.omx_upstream_path, snapshot)
-            target_version = normalize_version(
-                str(
-                    snapshot.get("npm_latest", {}).get("version", "")
-                    or snapshot.get("github_latest", {}).get("version", "")
-                    or snapshot.get("upstream_latest", "")
-                    or "latest"
-                )
-            )
+    target_version, snapshot = omx_resolve_update_target(ctx, str(args.version or ""))
 
     package_spec = f"oh-my-codex@{target_version}" if target_version != "latest" else "oh-my-codex@latest"
     log_path = ctx.omx_update_log_path

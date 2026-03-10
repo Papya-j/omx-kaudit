@@ -62,6 +62,14 @@ git pull
 ./install.sh ../linux
 ```
 
+One command update:
+
+```bash
+./update-target.sh ../linux
+```
+
+This performs `git pull --ff-only` in the overlay repository when possible and then reapplies the overlay into the target tree.
+
 ## Uninstall
 
 Remove the overlay files but keep runtime artifacts:
@@ -75,6 +83,17 @@ Remove the overlay files and all runtime state under `.omx/kernel-audit/`:
 ```bash
 ./uninstall.sh ../linux --purge-runtime
 ```
+
+## What Changed In The Current Overlay
+
+This overlay currently tracks the OMX 0.8.11 generation of the workflow.
+
+Notable behavior included in the shipped `kaudit`:
+
+- `kaudit omx update` no longer re-installs stale cached versions when live upstream information is newer
+- `kaudit omx status` exposes event-query and monitor-snapshot team API capability flags
+- team preflight uses OMX event-query APIs when available for lower-polling waits
+- project refresh remains part of the update path through `omx setup --scope project --force`
 
 ## Sync This Overlay From A Development Tree
 
