@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subject", "to", "cc", "body_text", "markdown_summary"],
+  "properties": {
+    "subject": {"type": "string"},
+    "to": {"type": "array", "items": {"type": "string"}},
+    "cc": {"type": "array", "items": {"type": "string"}},
+    "body_text": {"type": "string"},
+    "markdown_summary": {"type": "string"}
+  }
+}

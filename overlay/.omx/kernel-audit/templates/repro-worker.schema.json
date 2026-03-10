@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "supported",
+    "rootfs_mode",
+    "required_config",
+    "command",
+    "source_c",
+    "run_script",
+    "reasoning",
+    "why_self_contained",
+    "compile_strategy",
+    "manual_constraints"
+  ],
+  "properties": {
+    "supported": {"type": "boolean"},
+    "rootfs_mode": {"type": "string", "enum": ["auto", "busybox", "debian"]},
+    "required_config": {"type": "array", "items": {"type": "string"}},
+    "command": {"type": "string"},
+    "source_c": {"type": "string"},
+    "run_script": {"type": "string"},
+    "reasoning": {"type": "string"},
+    "why_self_contained": {"type": "string"},
+    "compile_strategy": {"type": "string"},
+    "manual_constraints": {"type": "string"}
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker_summary", "candidates"],
+  "properties": {
+    "worker_summary": {"type": "string"},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "line",
+          "function",
+          "vuln_class",
+          "entry_surface",
+          "attacker_control",
+          "root_cause_summary",
+          "proof_outline",
+          "novelty_analysis",
+          "repro_feasibility",
+          "required_config",
+          "confidence",
+          "is_duplicate",
+          "worker_summary"
+        ],
+        "properties": {
+          "path": {"type": "string"},
+          "line": {"type": "integer", "minimum": 1},
+          "function": {"type": "string"},
+          "vuln_class": {"type": "string"},
+          "entry_surface": {"type": "string"},
+          "attacker_control": {"type": "string"},
+          "root_cause_summary": {"type": "string"},
+          "proof_outline": {"type": "string"},
+          "novelty_analysis": {"type": "string"},
+          "repro_feasibility": {"type": "string"},
+          "required_config": {"type": "array", "items": {"type": "string"}},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "is_duplicate": {"type": "boolean"},
+          "worker_summary": {"type": "string"}
+        }
+      }
+    }
+  }
+}

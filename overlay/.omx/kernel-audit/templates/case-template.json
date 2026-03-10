@@ -1,0 +1,77 @@
+{
+  "analysis": {
+    "candidate": {},
+    "signature": {}
+  },
+  "attack_scenario": "",
+  "case_id": "case-template",
+  "config_fragments": [
+    "base-kasan.config",
+    "fs-broad.config"
+  ],
+  "created_at": "1970-01-01T00:00:00Z",
+  "disclosure": {
+    "body_text": "",
+    "cc": [],
+    "markdown_summary": "",
+    "subject": "",
+    "to": []
+  },
+  "discovery": {
+    "attacker_control": "",
+    "confidence": 0.0,
+    "entry_surface": "",
+    "novelty_analysis": "",
+    "prompt_version": "v2",
+    "proof_outline": "",
+    "repro_feasibility": "",
+    "shard": "",
+    "worker_summary": ""
+  },
+  "email_report_path": null,
+  "impact": "",
+  "kasan_detected": false,
+  "kernel_version": null,
+  "known_vuln_similarity": {
+    "best_match": null,
+    "max_score": 0.0,
+    "source": null
+  },
+  "parameter_assumptions": [],
+  "poc_artifacts": [],
+  "qemu_log": null,
+  "report_path": null,
+  "repro_attempts": [],
+  "repro_plan": {
+    "compile_strategy": "",
+    "reasoning": "",
+    "required_config": [],
+    "rootfs_mode": "auto",
+    "supported": false,
+    "why_self_contained": ""
+  },
+  "required_config": [],
+  "root_cause": "",
+  "stage": "discovered",
+  "status": "candidate",
+  "suspect_functions": [],
+  "target_paths": [
+    "fs/"
+  ],
+  "trigger": {
+    "command": "",
+    "description": "Add a realistic trigger command or run script.",
+    "run_script": "",
+    "source_c": ""
+  },
+  "verification": {
+    "auto_repro_supported": false,
+    "confidence": 0.0,
+    "duplicate_analysis": "",
+    "manual_constraints": "",
+    "proof": "",
+    "repro_requirements": "",
+    "trigger_contract": "",
+    "verdict": "pending"
+  }
+}

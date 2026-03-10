@@ -1,0 +1,14 @@
+# BEGIN OMX KERNEL AUDIT
+.omx/kernel-audit/artifacts/
+.omx/kernel-audit/build/
+.omx/kernel-audit/knowledge/
+.omx/kernel-audit/logs/
+.omx/kernel-audit/reports/
+.omx/kernel-audit/rootfs/
+.omx/kernel-audit/state/
+.omx/kernel-audit/bin/__pycache__/
+.omx/state/
+.omx/plans/
+.omx/notepad.md
+.omx/project-memory.json
+# END OMX KERNEL AUDIT
