@@ -1739,16 +1739,30 @@ def kernel_release(ctx: KernelAuditContext) -> str:
     return out.stdout.strip()
 
 
+def ensure_build_config_exists(ctx: KernelAuditContext) -> None:
+    build_config = ctx.build_dir / ".config"
+    if build_config.exists():
+        return
+    print("[kaudit] generating initial allmodconfig (x86_64)")
+    run_cmd(["make", f"O={ctx.build_dir}", "ARCH=x86_64", "allmodconfig"], cwd=ctx.repo_root, check=True)
+
+
+def write_generated_fragment(ctx: KernelAuditContext, name: str, lines: Sequence[str]) -> Path:
+    frag = ctx.fragments_dir / name
+    if not lines:
+        if frag.exists():
+            frag.unlink()
+        return frag
+    frag.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return frag
+
+
 def cmd_build_init(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     ctx.ensure_layout()
     ensure_default_files(ctx)
 
     jobs = args.jobs if args.jobs and args.jobs > 0 else os.cpu_count() or 1
-    build_config = ctx.build_dir / ".config"
-
-    if not build_config.exists():
-        print("[kaudit] generating initial allmodconfig (x86_64)")
-        run_cmd(["make", f"O={ctx.build_dir}", "ARCH=x86_64", "allmodconfig"], cwd=ctx.repo_root, check=True)
+    ensure_build_config_exists(ctx)
 
     apply_fragments(ctx)
 
@@ -1780,6 +1794,97 @@ def cmd_build_init(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     print("[kaudit] build init complete")
     print(f"[kaudit] kernel release: {release}")
     print(f"[kaudit] bzImage: {bzimage}")
+    return 0
+
+
+def case_effective_required_config(case: Dict[str, Any]) -> List[str]:
+    repro_plan = case.get("repro_plan", {}) if isinstance(case.get("repro_plan"), dict) else {}
+    return merge_required_config(case.get("required_config", []), as_str_list(repro_plan.get("required_config", [])))
+
+
+def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
+    ctx.ensure_layout()
+    ensure_default_files(ctx)
+
+    stages = {
+        s.strip()
+        for s in str(getattr(args, "stages", "repro_queued") or "repro_queued").split(",")
+        if s.strip()
+    }
+    if not stages:
+        return fail("--stages must include at least one stage")
+
+    cases = collect_cases_by_stage(ctx, stages)
+    cases.sort(
+        key=lambda item: str(item.get("last_verified_at", item.get("created_at", ""))),
+        reverse=not bool(getattr(args, "oldest_first", False)),
+    )
+    limit = max(0, as_int(getattr(args, "limit", 0), 0))
+    if limit:
+        cases = cases[:limit]
+    if not cases:
+        print("[kaudit] build repro-backlog: no matching cases")
+        return 0
+
+    merged_required = merge_required_config(*(case_effective_required_config(case) for case in cases))
+    if bool(getattr(args, "missing_only", True)):
+        current_config = load_build_config_map(ctx)
+        missing_only = [item for item in merged_required if not config_requirement_satisfied(item, current_config)]
+    else:
+        missing_only = list(merged_required)
+
+    print("[kaudit] build repro-backlog plan")
+    print(f"- stages: {', '.join(sorted(stages))}")
+    print(f"- cases: {len(cases)}")
+    print(f"- missing_only: {bool(getattr(args, 'missing_only', True))}")
+    print(f"- merged_required_count: {len(merged_required)}")
+    print(f"- to_apply_count: {len(missing_only)}")
+    for item in missing_only[:50]:
+        print(f"  - {item}")
+    if len(missing_only) > 50:
+        print(f"  - ... ({len(missing_only) - 50} more)")
+
+    if not missing_only:
+        print("[kaudit] build repro-backlog: current bzImage already satisfies all selected case configs")
+        return 0
+
+    ensure_build_config_exists(ctx)
+    generated_fragment = write_generated_fragment(ctx, "repro-backlog.config", missing_only)
+    apply_fragments(ctx, extra_fragments=[generated_fragment])
+
+    jobs = args.jobs if args.jobs and args.jobs > 0 else os.cpu_count() or 1
+    print(f"[kaudit] building bzImage with -j{jobs}")
+    run_cmd(
+        [
+            "make",
+            f"O={ctx.build_dir}",
+            "ARCH=x86_64",
+            f"-j{jobs}",
+            "bzImage",
+        ],
+        cwd=ctx.repo_root,
+        check=True,
+    )
+
+    release = kernel_release(ctx)
+    bzimage = ctx.build_dir / "arch" / "x86" / "boot" / "bzImage"
+    build_state = {
+        "updated_at": utc_now_iso(),
+        "kernel_release": release,
+        "bzImage": str(bzimage),
+        "fragments": [str(p.name) for p in fragment_paths(ctx)] + [generated_fragment.name],
+        "jobs": jobs,
+        "repro_backlog_fragment": str(generated_fragment),
+        "repro_backlog_stages": sorted(stages),
+        "repro_backlog_case_count": len(cases),
+        "repro_backlog_config_count": len(missing_only),
+    }
+    write_json(ctx.build_state_path, build_state)
+
+    print("[kaudit] build repro-backlog complete")
+    print(f"[kaudit] kernel release: {release}")
+    print(f"[kaudit] bzImage: {bzimage}")
+    print(f"[kaudit] generated_fragment: {generated_fragment}")
     return 0
 
 
@@ -2701,6 +2806,82 @@ def normalize_config_entry(item: Any) -> Optional[str]:
     return None
 
 
+def load_build_config_map(ctx: KernelAuditContext) -> Dict[str, str]:
+    cfg = ctx.build_dir / ".config"
+    if not cfg.exists():
+        return {}
+    out: Dict[str, str] = {}
+    for line in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.fullmatch(r"CONFIG_([A-Za-z0-9_]+)=(.*)", line)
+        if m:
+            out[m.group(1)] = m.group(2)
+            continue
+        m = re.fullmatch(r"# CONFIG_([A-Za-z0-9_]+) is not set", line)
+        if m:
+            out[m.group(1)] = "n"
+    return out
+
+
+def config_requirement_satisfied(requirement: str, config_map: Dict[str, str]) -> bool:
+    req = normalize_config_entry(requirement)
+    if not req:
+        return True
+    m = re.fullmatch(r"CONFIG_([A-Za-z0-9_]+)=(.*)", req)
+    if m:
+        key = m.group(1)
+        want = m.group(2)
+        have = config_map.get(key, "n")
+        if want == "m":
+            return have in {"m", "y"}
+        if want == "n":
+            return have == "n"
+        return have == want
+    m = re.fullmatch(r"# CONFIG_([A-Za-z0-9_]+) is not set", req)
+    if m:
+        return config_map.get(m.group(1), "n") == "n"
+    return True
+
+
+def missing_required_config(ctx: KernelAuditContext, case: Dict[str, Any]) -> List[str]:
+    config_map = load_build_config_map(ctx)
+    if not config_map:
+        return merge_required_config(case.get("required_config", []))
+    missing: List[str] = []
+    for item in merge_required_config(case.get("required_config", [])):
+        if not config_requirement_satisfied(item, config_map):
+            missing.append(item)
+    return missing
+
+
+def select_repro_batch_cases(
+    ctx: KernelAuditContext,
+    args: argparse.Namespace,
+    limit: int,
+) -> Tuple[List[Dict[str, Any]], List[Tuple[str, List[str]]]]:
+    pending_all = sorted(
+        collect_cases_by_stage(ctx, {"repro_queued"}),
+        key=lambda item: str(item.get("last_verified_at", item.get("created_at", ""))),
+        reverse=not bool(getattr(args, "oldest_first", False)),
+    )
+    selected: List[Dict[str, Any]] = []
+    skipped_missing_config: List[Tuple[str, List[str]]] = []
+    skip_build = bool(getattr(args, "repro_skip_build", False))
+
+    for case in pending_all:
+        if len(selected) >= limit:
+            break
+        if skip_build:
+            missing = missing_required_config(ctx, case)
+            if missing:
+                skipped_missing_config.append((case["case_id"], missing))
+                continue
+        selected.append(case)
+    return selected, skipped_missing_config
+
+
 def case_location_key(candidate: Dict[str, Any]) -> str:
     return f"{candidate.get('path', '')}:{candidate.get('line', 0)}:{candidate.get('kind', '')}"
 
@@ -3181,65 +3362,80 @@ def run_single_cycle(
             debian_include="busybox,ca-certificates",
             debian_force_cache=False,
             jobs=0,
+            backlog_only=False,
+            oldest_first=False,
         )
 
+    backlog_only = bool(getattr(args, "backlog_only", False))
+    oldest_first = bool(getattr(args, "oldest_first", False))
     audit_workers = max(1, as_int(getattr(args, "audit_workers", DEFAULT_AUDIT_WORKERS), DEFAULT_AUDIT_WORKERS))
-    selected_audit_queue = select_next_shards(ctx, target, audit_workers)
+    selected_audit_queue = [] if backlog_only else select_next_shards(ctx, target, audit_workers)
     completed_jobs: List[Dict[str, Any]] = []
 
-    set_pipeline_active_jobs(
-        ctx,
-        [
+    created_case_ids: List[str] = []
+    if backlog_only:
+        completed_jobs.append(
             pipeline_job_record(
                 "discovery",
                 target,
-                "running",
-                details={"target": target, "shards": selected_audit_queue, "workers": audit_workers},
+                "skipped",
+                details={"target": target, "reason": "backlog_only"},
             )
-        ],
-    )
-    try:
-        created_case_ids = discover_cases_once(
+        )
+    else:
+        set_pipeline_active_jobs(
             ctx,
-            target=target,
-            similarity_threshold=similarity_threshold,
-            audit_workers=audit_workers,
-            worker_model=str(getattr(args, "worker_model", "") or ""),
-            worker_reasoning_effort=str(
-                getattr(args, "worker_reasoning_effort", CODEX_WORKER_REASONING_DEFAULT)
-                or CODEX_WORKER_REASONING_DEFAULT
-            ),
-            worker_timeout=max(
-                120,
-                as_int(getattr(args, "worker_timeout", CODEX_WORKER_TIMEOUT_DEFAULT), CODEX_WORKER_TIMEOUT_DEFAULT),
-            ),
+            [
+                pipeline_job_record(
+                    "discovery",
+                    target,
+                    "running",
+                    details={"target": target, "shards": selected_audit_queue, "workers": audit_workers},
+                )
+            ],
         )
-        completed_jobs.append(
-            pipeline_job_record(
-                "discovery",
-                target,
-                "completed",
-                details={
-                    "target": target,
-                    "shards": selected_audit_queue,
-                    "created_cases": created_case_ids,
-                    "count": len(created_case_ids),
-                },
+        try:
+            created_case_ids = discover_cases_once(
+                ctx,
+                target=target,
+                similarity_threshold=similarity_threshold,
+                audit_workers=audit_workers,
+                worker_model=str(getattr(args, "worker_model", "") or ""),
+                worker_reasoning_effort=str(
+                    getattr(args, "worker_reasoning_effort", CODEX_WORKER_REASONING_DEFAULT)
+                    or CODEX_WORKER_REASONING_DEFAULT
+                ),
+                worker_timeout=max(
+                    120,
+                    as_int(getattr(args, "worker_timeout", CODEX_WORKER_TIMEOUT_DEFAULT), CODEX_WORKER_TIMEOUT_DEFAULT),
+                ),
             )
-        )
-    except Exception as exc:
-        completed_jobs.append(
-            pipeline_job_record(
-                "discovery",
-                target,
-                "failed",
-                details={"target": target, "shards": selected_audit_queue, "error": str(exc)},
+            completed_jobs.append(
+                pipeline_job_record(
+                    "discovery",
+                    target,
+                    "completed",
+                    details={
+                        "target": target,
+                        "shards": selected_audit_queue,
+                        "created_cases": created_case_ids,
+                        "count": len(created_case_ids),
+                    },
+                )
             )
-        )
-        append_pipeline_completed_jobs(ctx, completed_jobs)
+        except Exception as exc:
+            completed_jobs.append(
+                pipeline_job_record(
+                    "discovery",
+                    target,
+                    "failed",
+                    details={"target": target, "shards": selected_audit_queue, "error": str(exc)},
+                )
+            )
+            append_pipeline_completed_jobs(ctx, completed_jobs)
+            set_pipeline_active_jobs(ctx, [])
+            raise
         set_pipeline_active_jobs(ctx, [])
-        raise
-    set_pipeline_active_jobs(ctx, [])
 
     verified_case_ids: List[str] = []
     confirmed_case_ids: List[str] = []
@@ -3250,7 +3446,7 @@ def run_single_cycle(
         verify_candidates = sorted(
             collect_cases_by_stage(ctx, {"discovered"}),
             key=lambda item: str(item.get("created_at", "")),
-            reverse=True,
+            reverse=not oldest_first,
         )[:verify_limit]
         set_pipeline_active_jobs(
             ctx,
@@ -3288,11 +3484,7 @@ def run_single_cycle(
         set_pipeline_active_jobs(ctx, [])
     if bool(getattr(args, "auto_repro", True)):
         repro_limit = max(1, as_int(getattr(args, "repro_workers", DEFAULT_REPRO_WORKERS), DEFAULT_REPRO_WORKERS))
-        repro_candidates = sorted(
-            collect_cases_by_stage(ctx, {"repro_queued"}),
-            key=lambda item: str(item.get("last_verified_at", item.get("created_at", ""))),
-            reverse=True,
-        )[:repro_limit]
+        repro_candidates, skipped_repro_config = select_repro_batch_cases(ctx, args, repro_limit)
         set_pipeline_active_jobs(
             ctx,
             [
@@ -3300,7 +3492,13 @@ def run_single_cycle(
                     "repro",
                     "repro-batch",
                     "running",
-                    details={"case_ids": [case["case_id"] for case in repro_candidates], "workers": repro_limit},
+                    details={
+                        "case_ids": [case["case_id"] for case in repro_candidates],
+                        "workers": repro_limit,
+                        "skipped_missing_config": [
+                            {"case_id": case_id, "missing": missing} for case_id, missing in skipped_repro_config
+                        ],
+                    },
                 )
             ],
         )
@@ -3332,7 +3530,7 @@ def run_single_cycle(
         report_candidates = sorted(
             collect_cases_by_stage(ctx, {"confirmed"}),
             key=lambda item: str(item.get("last_repro_at", item.get("created_at", ""))),
-            reverse=True,
+            reverse=not oldest_first,
         )[:report_limit]
         set_pipeline_active_jobs(
             ctx,
@@ -3372,7 +3570,7 @@ def run_single_cycle(
     update_pipeline_snapshot(
         ctx,
         target=target,
-        audit_queue=select_next_shards(ctx, target, audit_workers),
+        audit_queue=[] if backlog_only else select_next_shards(ctx, target, audit_workers),
         active_jobs=[],
         completed_jobs=completed_jobs,
     )
@@ -5280,7 +5478,7 @@ def build_patch_sketch(case: Dict[str, Any]) -> str:
 
 
 def infer_public_required_config(case: Dict[str, Any]) -> List[str]:
-    required = merge_required_config(case.get("required_config", []))
+    required = case_effective_required_config(case)
     target_path = next(iter(as_str_list(case.get("target_paths", []))), "")
     inferred: List[str] = ["CONFIG_KASAN=y", "CONFIG_BLK_DEV_LOOP=y"]
     fs_map = {
@@ -5765,7 +5963,7 @@ def run_verify_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[
     pending = sorted(
         collect_cases_by_stage(ctx, {"discovered"}),
         key=lambda item: str(item.get("created_at", "")),
-        reverse=True,
+        reverse=not bool(getattr(args, "oldest_first", False)),
     )[:limit]
     if not pending:
         return []
@@ -5997,23 +6195,49 @@ def run_auto_repro_case(ctx: KernelAuditContext, case_id: str, args: argparse.Na
 
 def run_repro_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[str]:
     limit = max(1, as_int(getattr(args, "repro_workers", DEFAULT_REPRO_WORKERS), DEFAULT_REPRO_WORKERS))
-    pending = sorted(
-        collect_cases_by_stage(ctx, {"repro_queued"}),
-        key=lambda item: str(item.get("last_verified_at", item.get("created_at", ""))),
-        reverse=True,
-    )[:limit]
+    pending, skipped_missing_config = select_repro_batch_cases(ctx, args, limit)
     confirmed_ids: List[str] = []
-    for case in pending:
+    for case_id, missing in skipped_missing_config:
+        print(
+            f"[kaudit] repro deferred for {case_id}: current bzImage is missing required config "
+            f"({', '.join(missing)})"
+        )
+
+    def _run_one(case_id: str) -> Tuple[str, bool, Optional[str]]:
         try:
-            confirmed = run_auto_repro_case(ctx, case["case_id"], args)
+            confirmed = run_auto_repro_case(ctx, case_id, args)
+            return case_id, confirmed, None
         except Exception as exc:
-            current = ensure_case_exists(ctx, case["case_id"])
+            current = ensure_case_exists(ctx, case_id)
             current = mark_case_repro_failure(current, f"unexpected repro-batch failure: {exc}")
             save_case(ctx, current)
-            print(f"[kaudit] repro worker failed for {case['case_id']}: {exc}")
-            continue
-        if confirmed:
-            confirmed_ids.append(case["case_id"])
+            return case_id, False, str(exc)
+
+    parallel_repro = bool(getattr(args, "repro_skip_build", False)) and limit > 1
+    if limit > 1 and not parallel_repro:
+        print(
+            "[kaudit] repro parallelism disabled because shared build tree rebuild is unsafe; "
+            "use --repro-skip-build after a fresh build to run multiple QEMU repro workers in parallel"
+        )
+
+    if parallel_repro:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, limit)) as pool:
+            futures = {pool.submit(_run_one, case["case_id"]): case["case_id"] for case in pending}
+            for future in concurrent.futures.as_completed(futures):
+                case_id, confirmed, error = future.result()
+                if error:
+                    print(f"[kaudit] repro worker failed for {case_id}: {error}")
+                    continue
+                if confirmed:
+                    confirmed_ids.append(case_id)
+    else:
+        for case in pending:
+            case_id, confirmed, error = _run_one(case["case_id"])
+            if error:
+                print(f"[kaudit] repro worker failed for {case_id}: {error}")
+                continue
+            if confirmed:
+                confirmed_ids.append(case_id)
     return confirmed_ids
 
 
@@ -6155,7 +6379,7 @@ def build_markdown_report(
     log_file: Path,
     poc_context: Dict[str, Any],
 ) -> str:
-    required_config = merge_required_config(case.get("required_config", []))
+    required_config = case_effective_required_config(case)
     kernel_version = case.get("kernel_version") or "unknown"
     root_cause = case.get("root_cause") or "unknown"
     impact = case.get("impact") or "unknown"
@@ -6221,6 +6445,7 @@ def build_email_report(
     to_line = ", ".join(as_str_list(disclosure.get("to", [])))
     cc_line = ", ".join(as_str_list(disclosure.get("cc", [])))
     body = str(disclosure.get("body_text", "") or "").strip()
+    required_config = case_effective_required_config(case)
     if not body:
         body = textwrap.dedent(
             f"""\
@@ -6249,6 +6474,8 @@ def build_email_report(
             - log: {log_file}
             """
         ).strip()
+    if required_config:
+        body = f"{body}\n\nRequired config:\n" + "\n".join(f"- {line}" for line in required_config)
 
     poc_section = render_email_poc_section(poc_context)
     if poc_section:
@@ -6445,7 +6672,7 @@ def run_report_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[
     pending = sorted(
         collect_cases_by_stage(ctx, {"confirmed"}),
         key=lambda item: str(item.get("last_repro_at", item.get("created_at", ""))),
-        reverse=True,
+        reverse=not bool(getattr(args, "oldest_first", False)),
     )[:limit]
     reported: List[str] = []
     for case in pending:
@@ -6464,6 +6691,10 @@ def run_report_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[
         rc = cmd_report(ctx, report_args)
         if rc == 0:
             reported.append(case["case_id"])
+            if bool(getattr(args, "auto_public_report", True)):
+                public_rc = cmd_public_report(ctx, argparse.Namespace(case_id=case["case_id"]))
+                if public_rc != 0:
+                    print(f"[kaudit] public report generation failed for {case['case_id']}")
     return reported
 
 
@@ -6723,7 +6954,19 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate.add_argument("--no-auto-repro", dest="auto_repro", action="store_false", help="skip repro stage")
     orchestrate.add_argument("--auto-report", dest="auto_report", action="store_true", help="auto run report stage")
     orchestrate.add_argument("--no-auto-report", dest="auto_report", action="store_false", help="skip report stage")
-    orchestrate.set_defaults(auto_verify=True, auto_repro=True, auto_report=True)
+    orchestrate.add_argument(
+        "--auto-public-report",
+        dest="auto_public_report",
+        action="store_true",
+        help="after internal report generation, also generate public-report artifacts",
+    )
+    orchestrate.add_argument(
+        "--no-auto-public-report",
+        dest="auto_public_report",
+        action="store_false",
+        help="skip automatic public-report generation after internal report",
+    )
+    orchestrate.set_defaults(auto_verify=True, auto_repro=True, auto_report=True, auto_public_report=True)
     orchestrate.add_argument("--repro-timeout", type=int, default=240)
     orchestrate.add_argument("--repro-attempts", type=int, default=3)
     orchestrate.add_argument("--repro-skip-build", action="store_true")
@@ -6745,6 +6988,29 @@ def build_parser() -> argparse.ArgumentParser:
     build_sub = build.add_subparsers(dest="build_cmd", required=True)
     build_init = build_sub.add_parser("init", help="initial allmodconfig + kasan build")
     build_init.add_argument("--jobs", type=int, default=0, help="parallel build jobs (default: nproc)")
+    build_repro_backlog = build_sub.add_parser(
+        "repro-backlog",
+        help="merge required_config from repro backlog cases and build one shared bzImage",
+    )
+    build_repro_backlog.add_argument(
+        "--stages",
+        default="repro_queued",
+        help="comma-separated case stages to collect config from (default: repro_queued)",
+    )
+    build_repro_backlog.add_argument("--jobs", type=int, default=0, help="parallel build jobs (default: nproc)")
+    build_repro_backlog.add_argument("--limit", type=int, default=0, help="optional max cases to inspect")
+    build_repro_backlog.add_argument(
+        "--oldest-first",
+        action="store_true",
+        help="collect cases oldest-first instead of newest-first",
+    )
+    build_repro_backlog.add_argument(
+        "--no-missing-only",
+        dest="missing_only",
+        action="store_false",
+        help="apply all merged required_config entries instead of only those missing from current .config",
+    )
+    build_repro_backlog.set_defaults(missing_only=True)
 
     build_init_alias = sub.add_parser("build-init", help="alias for build init")
     build_init_alias.add_argument("--config", default="allmodconfig", help="accepted for compatibility")
@@ -6832,13 +7098,35 @@ def build_parser() -> argparse.ArgumentParser:
     cycle.add_argument("--verify-workers", type=int, default=DEFAULT_VERIFY_WORKERS)
     cycle.add_argument("--repro-workers", type=int, default=DEFAULT_REPRO_WORKERS)
     cycle.add_argument("--report-workers", type=int, default=DEFAULT_REPORT_WORKERS)
+    cycle.add_argument(
+        "--backlog-only",
+        action="store_true",
+        help="skip new discovery and drain existing discovered/repro_queued/confirmed backlog only",
+    )
+    cycle.add_argument(
+        "--oldest-first",
+        action="store_true",
+        help="process verify/repro/report queues oldest-first instead of newest-first",
+    )
     cycle.add_argument("--auto-verify", dest="auto_verify", action="store_true", help="auto run verifier stage")
     cycle.add_argument("--no-auto-verify", dest="auto_verify", action="store_false", help="skip verifier stage")
     cycle.add_argument("--auto-repro", dest="auto_repro", action="store_true", help="auto run repro stage")
     cycle.add_argument("--no-auto-repro", dest="auto_repro", action="store_false", help="skip repro stage")
     cycle.add_argument("--auto-report", dest="auto_report", action="store_true", help="auto run report stage")
     cycle.add_argument("--no-auto-report", dest="auto_report", action="store_false", help="skip report stage")
-    cycle.set_defaults(auto_verify=True, auto_repro=True, auto_report=True)
+    cycle.add_argument(
+        "--auto-public-report",
+        dest="auto_public_report",
+        action="store_true",
+        help="after internal report generation, also generate public-report artifacts",
+    )
+    cycle.add_argument(
+        "--no-auto-public-report",
+        dest="auto_public_report",
+        action="store_false",
+        help="skip automatic public-report generation after internal report",
+    )
+    cycle.set_defaults(auto_verify=True, auto_repro=True, auto_report=True, auto_public_report=True)
     cycle.add_argument("--repro-timeout", type=int, default=240)
     cycle.add_argument("--repro-attempts", type=int, default=3)
     cycle.add_argument("--repro-skip-build", action="store_true")
@@ -7054,6 +7342,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_build_init(ctx, args)
         if args.command == "build" and args.build_cmd == "init":
             return cmd_build_init(ctx, args)
+        if args.command == "build" and args.build_cmd == "repro-backlog":
+            return cmd_build_repro_backlog(ctx, args)
         if args.command == "cycle":
             if args.max_iterations is not None and args.max_iterations < 0:
                 return fail("--max-iterations must be >= 0")
