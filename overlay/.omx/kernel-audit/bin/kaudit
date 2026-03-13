@@ -1802,6 +1802,16 @@ def case_effective_required_config(case: Dict[str, Any]) -> List[str]:
     return merge_required_config(case.get("required_config", []), as_str_list(repro_plan.get("required_config", [])))
 
 
+NONBLOCKING_REPRO_CONFIG = {
+    "CONFIG_KASAN_MULTI_SHOT=y",
+    "CONFIG_FRAME_POINTER=y",
+}
+
+
+def case_blocking_repro_config(case: Dict[str, Any]) -> List[str]:
+    return [item for item in case_effective_required_config(case) if item not in NONBLOCKING_REPRO_CONFIG]
+
+
 def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     ctx.ensure_layout()
     ensure_default_files(ctx)
@@ -1826,7 +1836,7 @@ def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -
         print("[kaudit] build repro-backlog: no matching cases")
         return 0
 
-    merged_required = merge_required_config(*(case_effective_required_config(case) for case in cases))
+    merged_required = merge_required_config(*(case_blocking_repro_config(case) for case in cases))
     if bool(getattr(args, "missing_only", True)):
         current_config = load_build_config_map(ctx)
         missing_only = [item for item in merged_required if not config_requirement_satisfied(item, current_config)]
@@ -2848,9 +2858,9 @@ def config_requirement_satisfied(requirement: str, config_map: Dict[str, str]) -
 def missing_required_config(ctx: KernelAuditContext, case: Dict[str, Any]) -> List[str]:
     config_map = load_build_config_map(ctx)
     if not config_map:
-        return merge_required_config(case.get("required_config", []))
+        return case_blocking_repro_config(case)
     missing: List[str] = []
-    for item in merge_required_config(case.get("required_config", [])):
+    for item in case_blocking_repro_config(case):
         if not config_requirement_satisfied(item, config_map):
             missing.append(item)
     return missing
