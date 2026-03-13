@@ -4557,13 +4557,19 @@ def cmd_orchestrate(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
 
 
 def ensure_case_exists(ctx: KernelAuditContext, case_id: str) -> Dict[str, Any]:
-    path = ctx.case_json_path(case_id)
-    if not path.exists():
-        raise RuntimeError(f"case not found: {case_id}")
-    case = normalize_case(read_json(path, {}))
-    if not case:
+    candidates: List[Path] = [ctx.case_json_path(case_id)]
+    for target in SUPPORTED_TARGETS:
+        alt = KernelAuditContext(ctx.repo_root, target).case_json_path(case_id)
+        if alt not in candidates:
+            candidates.append(alt)
+    for path in candidates:
+        if not path.exists():
+            continue
+        case = normalize_case(read_json(path, {}))
+        if case:
+            return case
         raise RuntimeError(f"failed to read case json: {path}")
-    return case
+    raise RuntimeError(f"case not found: {case_id}")
 
 
 def pipeline_target(ctx: KernelAuditContext) -> str:
@@ -5720,8 +5726,8 @@ def build_patch_sketch(case: Dict[str, Any]) -> str:
         --- a/{target_path or 'fs/unknown.c'}
         +++ b/{target_path or 'fs/unknown.c'}
         @@
-        +/* validate on-disk size/offset/count fields before dereference/copy */
-        +/* reject malformed metadata early with -EFSCORRUPTED/-EIO */
+        +/* validate attacker-controlled size/offset/count fields before dereference/copy */
+        +/* reject malformed state early with -EINVAL/-EIO/-EFSCORRUPTED as appropriate */
         """
     ).strip()
 
@@ -6564,7 +6570,10 @@ def build_local_disclosure(case: Dict[str, Any], excerpt: str, git_head: str) ->
     route_hint = infer_route_hint_from_excerpt(excerpt, case)
     subject = f"[SECURITY] {target_path}: case-specific {fs_label} trigger causes {kasan_kind} during {route_hint}"
 
-    trigger_summary = f"the case-specific {fs_label} image and trigger sequence"
+    if target_path.startswith("net/"):
+        trigger_summary = f"the case-specific {fs_label} trigger sequence"
+    else:
+        trigger_summary = f"the case-specific {fs_label} image and trigger sequence"
     trigger_contract = str(case.get("verification", {}).get("trigger_contract", "") or "").strip()
     if "nzones=1" in trigger_contract or "nzones == 1" in trigger_contract:
         trigger_summary = "the case-specific one-zone ADFS image and trigger sequence"
@@ -6600,10 +6609,10 @@ Attack scenario:
 {scenario}
 
 Reproduction summary:
-- Boot the provided bzImage with the generated BusyBox initramfs
-- Guest `/init` launches `{trigger_cmd}`
-- The PoC prepares and mounts {trigger_summary}
-- A normal filesystem operation triggers the KASAN report during {route_hint}
+            - Boot the provided bzImage with the generated BusyBox initramfs
+            - Guest `/init` launches `{trigger_cmd}`
+            - The PoC drives {trigger_summary}
+            - A normal kernel operation triggers the KASAN report during {route_hint}
 
 KASAN excerpt:
 {excerpt}
@@ -7517,6 +7526,7 @@ def build_parser() -> argparse.ArgumentParser:
     rootfs = sub.add_parser("rootfs", help="rootfs preparation and cache controls")
     rootfs_sub = rootfs.add_subparsers(dest="rootfs_cmd", required=True)
     rootfs_prepare = rootfs_sub.add_parser("prepare", help="prepare rootfs prerequisites/cache")
+    add_target_option(rootfs_prepare)
     rootfs_prepare.add_argument("--mode", choices=["auto", "busybox", "debian"], default="auto")
     rootfs_prepare.add_argument("--debian-suite", default="bookworm")
     rootfs_prepare.add_argument("--debian-mirror", default="http://deb.debian.org/debian")
