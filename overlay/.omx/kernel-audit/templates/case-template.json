@@ -6,8 +6,7 @@
   "attack_scenario": "",
   "case_id": "case-template",
   "config_fragments": [
-    "base-kasan.config",
-    "fs-broad.config"
+    "base-kasan.config"
   ],
   "created_at": "1970-01-01T00:00:00Z",
   "disclosure": {
@@ -55,9 +54,7 @@
   "stage": "discovered",
   "status": "candidate",
   "suspect_functions": [],
-  "target_paths": [
-    "fs/"
-  ],
+  "target_paths": [],
   "trigger": {
     "command": "",
     "description": "Add a realistic trigger command or run script.",

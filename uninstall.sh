@@ -63,11 +63,22 @@ done
 TARGET_DIR=$(cd -- "$TARGET_DIR" && pwd)
 
 rm -f "$TARGET_DIR/.agents/skills/kernel-audit/SKILL.md"
-rm -f "$TARGET_DIR/.codex/prompts/kernel-fs-auditor.md"
-rm -f "$TARGET_DIR/.codex/prompts/kernel-fs-disclosure-writer.md"
-rm -f "$TARGET_DIR/.codex/prompts/kernel-fs-discovery-worker.md"
-rm -f "$TARGET_DIR/.codex/prompts/kernel-fs-repro-worker.md"
-rm -f "$TARGET_DIR/.codex/prompts/kernel-fs-verifier-worker.md"
+for prompt in \
+  kernel-fs-auditor.md \
+  kernel-fs-disclosure-writer.md \
+  kernel-fs-discovery-worker.md \
+  kernel-fs-repro-worker.md \
+  kernel-fs-verifier-worker.md \
+  kernel-net-disclosure-writer.md \
+  kernel-net-discovery-worker.md \
+  kernel-net-repro-worker.md \
+  kernel-net-verifier-worker.md \
+  kernel-kctf-disclosure-writer.md \
+  kernel-kctf-discovery-worker.md \
+  kernel-kctf-repro-worker.md \
+  kernel-kctf-verifier-worker.md; do
+  rm -f "$TARGET_DIR/.codex/prompts/$prompt"
+done
 rm -f "$TARGET_DIR/.omx/kernel-audit/README.md"
 rm -rf "$TARGET_DIR/.omx/kernel-audit/bin"
 rm -rf "$TARGET_DIR/.omx/kernel-audit/config"

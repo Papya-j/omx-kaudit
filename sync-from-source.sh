@@ -33,6 +33,7 @@ mkdir -p "$TARGET_OVERLAY/.agents/skills/kernel-audit" \
          "$TARGET_OVERLAY/.codex/prompts" \
          "$TARGET_OVERLAY/.omx/kernel-audit/bin" \
          "$TARGET_OVERLAY/.omx/kernel-audit/config/fragments" \
+         "$TARGET_OVERLAY/.omx/kernel-audit/config/defconfigs" \
          "$TARGET_OVERLAY/.omx/kernel-audit/templates"
 
 cp "$SOURCE_DIR/.agents/skills/kernel-audit/SKILL.md" \
@@ -41,6 +42,10 @@ cp "$SOURCE_DIR/.codex/prompts/kernel-fs-"*.md \
    "$TARGET_OVERLAY/.codex/prompts/"
 if compgen -G "$SOURCE_DIR/.codex/prompts/kernel-net-*.md" >/dev/null; then
   cp "$SOURCE_DIR/.codex/prompts/kernel-net-"*.md \
+     "$TARGET_OVERLAY/.codex/prompts/"
+fi
+if compgen -G "$SOURCE_DIR/.codex/prompts/kernel-kctf-*.md" >/dev/null; then
+  cp "$SOURCE_DIR/.codex/prompts/kernel-kctf-"*.md \
      "$TARGET_OVERLAY/.codex/prompts/"
 fi
 cp "$SOURCE_DIR/.omx/kernel-audit/bin/kaudit" \
@@ -56,6 +61,14 @@ cp "$SOURCE_DIR/.omx/kernel-audit/config/fragments/fs-broad.config" \
 if [[ -f "$SOURCE_DIR/.omx/kernel-audit/config/fragments/net-broad.config" ]]; then
   cp "$SOURCE_DIR/.omx/kernel-audit/config/fragments/net-broad.config" \
      "$TARGET_OVERLAY/.omx/kernel-audit/config/fragments/"
+fi
+if [[ -f "$SOURCE_DIR/.omx/kernel-audit/config/fragments/kctf-broad.config" ]]; then
+  cp "$SOURCE_DIR/.omx/kernel-audit/config/fragments/kctf-broad.config" \
+     "$TARGET_OVERLAY/.omx/kernel-audit/config/fragments/"
+fi
+if compgen -G "$SOURCE_DIR/.omx/kernel-audit/config/defconfigs/*.config" >/dev/null; then
+  cp "$SOURCE_DIR/.omx/kernel-audit/config/defconfigs/"*.config \
+     "$TARGET_OVERLAY/.omx/kernel-audit/config/defconfigs/"
 fi
 cp "$SOURCE_DIR/.omx/kernel-audit/config/fragments/repro-stable.config" \
    "$TARGET_OVERLAY/.omx/kernel-audit/config/fragments/"

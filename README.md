@@ -5,6 +5,7 @@ Current built-in target profiles are:
 
 - `fs` (legacy default)
 - `net` (additive target namespace; existing fs outputs stay unchanged)
+- `kctf` (Lakitu/COS 6.12 profile with target-local build state and config-dead-code pruning)
 
 It does **not** ship:
 - Linux kernel source
@@ -24,8 +25,12 @@ The installer copies only these namespaced custom files into the target kernel t
 - `.agents/skills/kernel-audit/SKILL.md`
 - `.codex/prompts/kernel-fs-*.md`
 - `.codex/prompts/kernel-net-*.md`
+- `.codex/prompts/kernel-kctf-*.md`
 
 It does not overwrite unrelated OMX, Codex, or user files.
+
+For `kctf`, the overlay also ships the vendored COS `lakitu_defconfig` snapshot used to seed the target-local build.
+That profile is intended for Linux `6.12.x` trees because the vendored config is pinned to COS `6.12.68`.
 
 ## Prerequisites
 
@@ -147,6 +152,12 @@ Recommended after a sync:
 ./.omx/kernel-audit/bin/kaudit build init --jobs $(nproc)
 ```
 
+For the `kctf` target, use a `6.12.x` kernel tree and build the target-local Lakitu image explicitly:
+
+```bash
+./.omx/kernel-audit/bin/kaudit build init --target kctf --jobs $(nproc)
+```
+
 ## Recommended tmux Workflow
 
 `tmux` is strongly recommended for long-running campaigns.
@@ -209,9 +220,11 @@ After installation, the target kernel tree contains:
 <linux-tree>/
   .agents/skills/kernel-audit/
   .codex/prompts/kernel-fs-*.md
+  .codex/prompts/kernel-kctf-*.md
   .omx/kernel-audit/
     bin/kaudit
     config/fragments/
+    config/defconfigs/
     templates/
     artifacts/
     build/

@@ -122,6 +122,57 @@ NET_KEYWORDS = {
     "route",
 }
 
+KCTF_KEYWORDS = set(FS_KEYWORDS) | set(NET_KEYWORDS) | {
+    "user namespace",
+    "userns",
+    "io_uring",
+    "bpf",
+    "lpe",
+    "local privilege escalation",
+    "keyring",
+    "futex",
+    "watch_queue",
+    "tty",
+    "ioctl",
+    "msg_msg",
+    "vsock",
+    "overlayfs",
+    "fuse",
+}
+
+KERNEL_SOURCE_SCAN_PREFIXES = (
+    "arch/",
+    "block/",
+    "certs/",
+    "crypto/",
+    "drivers/",
+    "fs/",
+    "init/",
+    "io_uring/",
+    "ipc/",
+    "kernel/",
+    "lib/",
+    "mm/",
+    "net/",
+    "rust/",
+    "security/",
+    "sound/",
+    "virt/",
+)
+
+SCAN_PATTERNS = {
+    "fs": r"copy_from_user|copy_to_user|kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\(",
+    "net": (
+        r"copy_from_user|copy_to_user|memdup_user|sockptr|nla_parse|nla_memcpy|skb_put|skb_pull|skb_copy_bits|"
+        r"kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\("
+    ),
+    "kctf": (
+        r"copy_from_user|copy_to_user|memdup_user|sockptr|copy_struct_from_user|nla_parse|nla_memcpy|"
+        r"skb_put|skb_pull|skb_copy_bits|io_uring|futex|watch_queue|keyctl|bpf\(|"
+        r"kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\("
+    ),
+}
+
 WEAKNESS_KEYWORDS: Dict[str, Set[str]] = {
     "uaf": {"use-after-free", "uaf", "kfree", "dangling"},
     "oob-read": {"out-of-bounds read", "slab-out-of-bounds", "oob read", "overread"},
@@ -171,7 +222,7 @@ CASE_STAGE_TO_STATUS = {
 QUEUE_ACTIVE_STAGES = {"discovered", "verified", "repro_queued", "repro_running", "repro_failed"}
 CONFIRMED_STAGES = {"confirmed", "reported"}
 
-SUPPORTED_TARGETS = ("fs", "net")
+SUPPORTED_TARGETS = ("fs", "net", "kctf")
 
 DISCOVERY_SCHEMA_NAME = "discovery-worker.schema.json"
 VERIFY_SCHEMA_NAME = "verify-worker.schema.json"
@@ -187,7 +238,7 @@ OMX_SPARK_MODEL = "gpt-5.3-codex-spark"
 TEAM_PREFLIGHT_TIMEOUT_DEFAULT = 7200
 PRE_DISCLOSE_BATCH_STAGES_DEFAULT = "reported"
 TEAM_NUDGE_MAX_MS = 30 * 60 * 1000
-DEFAULT_FRAGMENT_NAMES = ("base-kasan.config", "fs-broad.config")
+DEFAULT_FRAGMENT_NAMES = ("base-kasan.config",)
 REPRO_STABLE_FRAGMENT_NAME = "repro-stable.config"
 
 BASE_KASAN_FRAGMENT = """# Core KASAN + debugging baseline
@@ -276,7 +327,7 @@ CASE_TEMPLATE: Dict[str, Any] = {
     "case_id": "case-template",
     "created_at": "1970-01-01T00:00:00Z",
     "stage": "discovered",
-    "target_paths": ["fs/"],
+    "target_paths": [],
     "suspect_functions": [],
     "parameter_assumptions": [],
     "known_vuln_similarity": {
@@ -284,7 +335,7 @@ CASE_TEMPLATE: Dict[str, Any] = {
         "best_match": None,
         "source": None,
     },
-    "config_fragments": ["base-kasan.config", "fs-broad.config"],
+    "config_fragments": list(DEFAULT_FRAGMENT_NAMES),
     "required_config": [],
     "poc_artifacts": [],
     "qemu_log": None,
@@ -389,6 +440,13 @@ TARGET_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_fragments": ("base-kasan.config", "fs-broad.config"),
         "broad_fragment_name": "fs-broad.config",
         "broad_fragment_body": FS_BROAD_FRAGMENT,
+        "scan_roots": ("fs/",),
+        "seed_pattern": "fs",
+        "shard_source": "subtree",
+        "dead_code_filter": "",
+        "build_dir_name": "x86_64",
+        "build_state_name": "build.json",
+        "config_seed": {"kind": "allmodconfig"},
         "prompts": {
             "discovery": "kernel-fs-discovery-worker.md",
             "verify": "kernel-fs-verifier-worker.md",
@@ -405,6 +463,13 @@ TARGET_PROFILES: Dict[str, Dict[str, Any]] = {
         "default_fragments": ("base-kasan.config", "net-broad.config"),
         "broad_fragment_name": "net-broad.config",
         "broad_fragment_body": NET_BROAD_FRAGMENT,
+        "scan_roots": ("net/",),
+        "seed_pattern": "net",
+        "shard_source": "subtree",
+        "dead_code_filter": "",
+        "build_dir_name": "x86_64",
+        "build_state_name": "build.json",
+        "config_seed": {"kind": "allmodconfig"},
         "prompts": {
             "discovery": "kernel-net-discovery-worker.md",
             "verify": "kernel-net-verifier-worker.md",
@@ -413,6 +478,37 @@ TARGET_PROFILES: Dict[str, Dict[str, Any]] = {
         },
         "syzbot_suffix": "net",
         "cve_suffix": "net",
+    },
+    "kctf": {
+        "slug": "kctf",
+        "domain_label": "kctf kernel",
+        "default_target_paths": list(KERNEL_SOURCE_SCAN_PREFIXES),
+        "default_fragments": ("base-kasan.config", "kctf-broad.config"),
+        "broad_fragment_name": "kctf-broad.config",
+        "broad_fragment_body": "# kCTF builds use the Lakitu base config as the reachability authority.\n",
+        "scan_roots": KERNEL_SOURCE_SCAN_PREFIXES,
+        "seed_pattern": "kctf",
+        "shard_source": "compiled",
+        "dead_code_filter": "compiled_sources",
+        "build_dir_name": "x86_64-kctf-lakitu-6.12",
+        "build_state_name": "build-kctf.json",
+        "config_seed": {
+            "kind": "full_config",
+            "file_name": "lakitu-6.12.68.config",
+            "label": "lakitu_defconfig",
+            "source_url": "https://cos.googlesource.com/third_party/kernel/+/refs/heads/cos-6.12/arch/x86/configs/lakitu_defconfig",
+            "lts_series": "6.12",
+            "lts_release": "6.12.68",
+            "enforce_lts_match": True,
+        },
+        "prompts": {
+            "discovery": "kernel-kctf-discovery-worker.md",
+            "verify": "kernel-kctf-verifier-worker.md",
+            "repro": "kernel-kctf-repro-worker.md",
+            "disclosure": "kernel-kctf-disclosure-writer.md",
+        },
+        "syzbot_suffix": "kctf",
+        "cve_suffix": "kctf",
     },
 }
 
@@ -605,6 +701,8 @@ def infer_subsystem_from_target_path(target_path: str) -> str:
     parts = [part for part in str(target_path or "").split("/") if part]
     if len(parts) >= 2 and parts[0] in {"fs", "net"}:
         return f"{parts[0]}/{parts[1]}"
+    if len(parts) >= 2 and parts[0] in {"arch", "block", "drivers", "io_uring", "ipc", "kernel", "lib", "mm", "security", "sound", "virt"}:
+        return f"{parts[0]}/{parts[1]}"
     if len(parts) >= 3 and parts[0] == "drivers" and parts[1] == "tty":
         return f"{parts[0]}/{parts[1]}/{parts[2]}"
     if len(parts) >= 2 and parts[0] == "drivers" and parts[1] == "tty":
@@ -627,6 +725,8 @@ def infer_component_label_from_target_path(target_path: str) -> str:
         return "networking"
     if subsystem.startswith("drivers/tty"):
         return "tty"
+    if subsystem.startswith("security/"):
+        return "security"
     return FS_LABEL_ALIASES.get(leaf, leaf.upper())
 
 
@@ -663,6 +763,12 @@ def infer_route_hint(case: Dict[str, Any]) -> str:
         return "mount"
     if target_path.startswith("net/"):
         return "networking access"
+    if target_path.startswith("fs/"):
+        return "filesystem access"
+    if target_path.startswith("io_uring/"):
+        return "io_uring submission"
+    if target_path.startswith("security/"):
+        return "security policy handling"
     return "filesystem access"
 
 
@@ -966,8 +1072,8 @@ def normalize_target_name(raw: str) -> str:
     target = str(raw or "fs").strip().lower().replace("\\", "/")
     if target in {"", "fs"}:
         return "fs"
-    if target == "net":
-        return "net"
+    if target in SUPPORTED_TARGETS:
+        return target
     raise RuntimeError(f"unsupported target: {raw}")
 
 
@@ -988,6 +1094,86 @@ def target_dir_name(base: str, target: str) -> str:
 def target_file_name(base: str, target: str) -> str:
     slug = target_slug(target)
     return base if not slug else f"{Path(base).stem}-{slug}{Path(base).suffix}"
+
+
+def normalize_repo_relpath(path: Any) -> str:
+    text = str(path or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def path_matches_roots(path: str, roots: Sequence[str]) -> bool:
+    rel = normalize_repo_relpath(path)
+    normalized_roots = [normalize_repo_relpath(root).rstrip("/") for root in roots if normalize_repo_relpath(root)]
+    if not normalized_roots:
+        return True
+    for root in normalized_roots:
+        if rel == root or rel.startswith(root + "/"):
+            return True
+    return False
+
+
+def target_scan_roots(target: str) -> Tuple[str, ...]:
+    profile = target_profile(target)
+    raw_roots = profile.get("scan_roots", ())
+    roots = [normalize_repo_relpath(item) for item in raw_roots if normalize_repo_relpath(item)]
+    if roots:
+        return tuple(roots)
+    fallback = normalize_repo_relpath(target)
+    return (fallback,) if fallback else ()
+
+
+def target_config_seed(target: str) -> Dict[str, Any]:
+    profile = target_profile(target)
+    seed = profile.get("config_seed", {})
+    return dict(seed) if isinstance(seed, dict) else {"kind": "allmodconfig"}
+
+
+def target_bzimage_relpath(target: str) -> Path:
+    profile = target_profile(target)
+    rel = str(profile.get("bzimage_relpath", "arch/x86/boot/bzImage") or "arch/x86/boot/bzImage")
+    return Path(rel)
+
+
+def source_tree_version(repo_root: Path) -> str:
+    makefile = repo_root / "Makefile"
+    text = makefile.read_text(encoding="utf-8", errors="replace")
+
+    def _extract(name: str, default: str = "0") -> str:
+        match = re.search(rf"^{name}\s*=\s*(.+)$", text, re.M)
+        return match.group(1).strip() if match else default
+
+    version = _extract("VERSION")
+    patchlevel = _extract("PATCHLEVEL")
+    sublevel = _extract("SUBLEVEL")
+    extraversion = _extract("EXTRAVERSION", "")
+    return f"{version}.{patchlevel}.{sublevel}{extraversion}"
+
+
+def source_tree_series(repo_root: Path) -> str:
+    version = source_tree_version(repo_root)
+    parts = version.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else version
+
+
+def ensure_target_source_compat(ctx: "KernelAuditContext") -> None:
+    seed = ctx.config_seed()
+    if not seed.get("enforce_lts_match"):
+        return
+    expected_series = str(seed.get("lts_series", "") or "").strip()
+    if not expected_series:
+        return
+    current_series = source_tree_series(ctx.repo_root)
+    if current_series == expected_series:
+        return
+    label = str(seed.get("label", seed.get("file_name", "target config")) or "target config")
+    expected_release = str(seed.get("lts_release", expected_series) or expected_series)
+    current_version = source_tree_version(ctx.repo_root)
+    raise RuntimeError(
+        f"target `{ctx.target}` requires a Linux {expected_series}.x source tree because {label} is pinned to "
+        f"{expected_release}; current source tree is {current_version}"
+    )
 
 
 def omx_install_root() -> Optional[Path]:
@@ -1409,8 +1595,10 @@ class KernelAuditContext:
         self.root = repo_root / ".omx" / "kernel-audit"
         self.state_dir = self.root / "state"
         self.knowledge_dir = self.root / "knowledge"
-        self.build_dir = self.root / "build" / "x86_64"
-        self.fragments_dir = self.root / "config" / "fragments"
+        self.build_dir = self.root / "build" / str(self.profile.get("build_dir_name", "x86_64") or "x86_64")
+        self.config_dir = self.root / "config"
+        self.fragments_dir = self.config_dir / "fragments"
+        self.defconfigs_dir = self.config_dir / "defconfigs"
         self.artifacts_dir = self.root / "artifacts" / target_dir_name("cases", self.target)
         self.reports_dir = self.root / target_dir_name("reports", self.target)
         self.public_reports_dir = self.reports_dir / "public"
@@ -1424,7 +1612,7 @@ class KernelAuditContext:
 
     @property
     def build_state_path(self) -> Path:
-        return self.state_dir / "build.json"
+        return self.state_dir / str(self.profile.get("build_state_name", "build.json") or "build.json")
 
     @property
     def pipeline_path(self) -> Path:
@@ -1474,12 +1662,30 @@ class KernelAuditContext:
         vals = self.profile.get("default_fragments", ())
         return tuple(str(v) for v in vals)
 
+    def scan_roots(self) -> Tuple[str, ...]:
+        return target_scan_roots(self.target)
+
+    def config_seed(self) -> Dict[str, Any]:
+        return target_config_seed(self.target)
+
+    def bzimage_path(self) -> Path:
+        return self.build_dir / target_bzimage_relpath(self.target)
+
+    def seed_config_path(self) -> Optional[Path]:
+        seed = self.config_seed()
+        file_name = str(seed.get("file_name", "") or "").strip()
+        if not file_name:
+            return None
+        return self.defconfigs_dir / file_name
+
     def ensure_layout(self) -> None:
         for p in [
             self.state_dir,
             self.knowledge_dir,
             self.build_dir,
+            self.config_dir,
             self.fragments_dir,
+            self.defconfigs_dir,
             self.artifacts_dir,
             self.reports_dir,
             self.public_reports_dir,
@@ -1637,7 +1843,7 @@ def normalize_case(case: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(case.get("required_config"), list):
         case["required_config"] = []
     if not isinstance(case.get("config_fragments"), list):
-        case["config_fragments"] = ["base-kasan.config", "fs-broad.config"]
+        case["config_fragments"] = list(DEFAULT_FRAGMENT_NAMES)
     if not isinstance(case.get("poc_artifacts"), list):
         case["poc_artifacts"] = []
     if not isinstance(case.get("repro_attempts"), list):
@@ -1684,6 +1890,7 @@ def ensure_default_files(ctx: KernelAuditContext) -> None:
     base_frag = ctx.fragments_dir / "base-kasan.config"
     fs_frag = ctx.fragments_dir / "fs-broad.config"
     net_frag = ctx.fragments_dir / "net-broad.config"
+    kctf_frag = ctx.fragments_dir / "kctf-broad.config"
     repro_stable_frag = ctx.fragments_dir / REPRO_STABLE_FRAGMENT_NAME
     if not base_frag.exists():
         base_frag.write_text(BASE_KASAN_FRAGMENT, encoding="utf-8")
@@ -1691,6 +1898,11 @@ def ensure_default_files(ctx: KernelAuditContext) -> None:
         fs_frag.write_text(FS_BROAD_FRAGMENT, encoding="utf-8")
     if not net_frag.exists():
         net_frag.write_text(NET_BROAD_FRAGMENT, encoding="utf-8")
+    if not kctf_frag.exists():
+        kctf_frag.write_text(
+            "# kCTF campaigns use the Lakitu base config as the dead-code filter authority.\n",
+            encoding="utf-8",
+        )
     if not repro_stable_frag.exists():
         repro_stable_frag.write_text(REPRO_STABLE_FRAGMENT, encoding="utf-8")
 
@@ -1809,6 +2021,46 @@ def fetch_syzbot_net(limit: int = 240) -> Dict[str, Any]:
     return fetch_syzbot_subsystem("net", limit=limit)
 
 
+def merge_syzbot_datasets(label: str, datasets: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    bugs: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    sources: List[str] = []
+    for dataset in datasets:
+        if not isinstance(dataset, dict):
+            continue
+        source = str(dataset.get("source", "") or "").strip()
+        if source:
+            sources.append(source)
+        for bug in dataset.get("bugs", []) if isinstance(dataset.get("bugs"), list) else []:
+            if not isinstance(bug, dict):
+                continue
+            extid = str(bug.get("extid", "") or "").strip()
+            if not extid or extid in seen:
+                continue
+            seen.add(extid)
+            bugs.append(bug)
+    bugs.sort(key=lambda item: str(item.get("last_crash") or item.get("first_crash") or ""), reverse=True)
+    return {
+        "source": f"merged:{label}",
+        "fetched_at": utc_now_iso(),
+        "sources": sources,
+        "bug_count": len(bugs),
+        "bugs": bugs,
+    }
+
+
+def fetch_syzbot_kctf(limit_per_subsystem: int = 120) -> Dict[str, Any]:
+    datasets: List[Dict[str, Any]] = []
+    for subsystem in ("fs", "net", "mm", "kernel", "security", "drivers"):
+        try:
+            datasets.append(fetch_syzbot_subsystem(subsystem, limit=limit_per_subsystem))
+        except Exception:
+            continue
+    if not datasets:
+        return merge_syzbot_datasets("kctf-empty", [])
+    return merge_syzbot_datasets("kctf", datasets)
+
+
 def extract_cwe(cna: Dict[str, Any]) -> List[str]:
     out: List[str] = []
     for pt in cna.get("problemTypes", []):
@@ -1884,6 +2136,10 @@ def fetch_cve_kernel_net(limit: int = 2500) -> Dict[str, Any]:
     return fetch_cve_kernel_target(limit=limit, keywords=NET_KEYWORDS, source_label="cve/linux-kernel/net")
 
 
+def fetch_cve_kernel_kctf(limit: int = 3500) -> Dict[str, Any]:
+    return fetch_cve_kernel_target(limit=limit, keywords=KCTF_KEYWORDS, source_label="cve/linux-kernel/kctf")
+
+
 def cmd_knowledge_refresh(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
     ctx.ensure_layout()
     ensure_default_files(ctx)
@@ -1893,6 +2149,10 @@ def cmd_knowledge_refresh(ctx: KernelAuditContext, _args: argparse.Namespace) ->
         syz = fetch_syzbot_net()
         cve = fetch_cve_kernel_net()
         label = "net"
+    elif ctx.target == "kctf":
+        syz = fetch_syzbot_kctf()
+        cve = fetch_cve_kernel_kctf()
+        label = "kctf"
     else:
         syz = fetch_syzbot_fs()
         cve = fetch_cve_kernel_fs()
@@ -1969,8 +2229,25 @@ def ensure_build_config_exists(ctx: KernelAuditContext) -> None:
     build_config = ctx.build_dir / ".config"
     if build_config.exists():
         return
-    print("[kaudit] generating initial allmodconfig (x86_64)")
-    run_cmd(["make", f"O={ctx.build_dir}", "ARCH=x86_64", "allmodconfig"], cwd=ctx.repo_root, check=True)
+    seed = ctx.config_seed()
+    kind = str(seed.get("kind", "allmodconfig") or "allmodconfig")
+    if kind == "allmodconfig":
+        print(f"[kaudit] generating initial allmodconfig for target `{ctx.target}` (x86_64)")
+        run_cmd(["make", f"O={ctx.build_dir}", "ARCH=x86_64", "allmodconfig"], cwd=ctx.repo_root, check=True)
+        return
+    if kind == "full_config":
+        ensure_target_source_compat(ctx)
+        seed_path = ctx.seed_config_path()
+        if not seed_path or not seed_path.exists():
+            raise RuntimeError(f"missing target seed config: {seed_path}")
+        print(
+            f"[kaudit] seeding build config for target `{ctx.target}` from "
+            f"{seed.get('label', seed_path.name)} ({seed_path})"
+        )
+        shutil.copy2(seed_path, build_config)
+        run_cmd(["make", f"O={ctx.build_dir}", "ARCH=x86_64", "olddefconfig"], cwd=ctx.repo_root, check=True)
+        return
+    raise RuntimeError(f"unsupported config seed kind for target `{ctx.target}`: {kind}")
 
 
 def write_generated_fragment(ctx: KernelAuditContext, name: str, lines: Sequence[str]) -> Path:
@@ -1986,8 +2263,10 @@ def write_generated_fragment(ctx: KernelAuditContext, name: str, lines: Sequence
 def cmd_build_init(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     ctx.ensure_layout()
     ensure_default_files(ctx)
+    ensure_target_source_compat(ctx)
 
     jobs = args.jobs if args.jobs and args.jobs > 0 else os.cpu_count() or 1
+    clear_compiled_source_cache(ctx)
     ensure_build_config_exists(ctx)
 
     apply_fragments(ctx)
@@ -2006,14 +2285,19 @@ def cmd_build_init(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     )
 
     release = kernel_release(ctx)
-    bzimage = ctx.build_dir / "arch" / "x86" / "boot" / "bzImage"
+    bzimage = ctx.bzimage_path()
+    seed = ctx.config_seed()
 
     build_state = {
         "updated_at": utc_now_iso(),
+        "target": ctx.target,
+        "build_dir": str(ctx.build_dir),
         "kernel_release": release,
         "bzImage": str(bzimage),
         "fragments": [str(p.name) for p in fragment_paths(ctx)],
         "jobs": jobs,
+        "config_seed": seed,
+        "source_tree_version": source_tree_version(ctx.repo_root),
     }
     write_json(ctx.build_state_path, build_state)
 
@@ -2041,6 +2325,8 @@ def case_blocking_repro_config(case: Dict[str, Any]) -> List[str]:
 def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     ctx.ensure_layout()
     ensure_default_files(ctx)
+    ensure_target_source_compat(ctx)
+    clear_compiled_source_cache(ctx)
 
     stages = {
         s.strip()
@@ -2103,9 +2389,11 @@ def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -
     )
 
     release = kernel_release(ctx)
-    bzimage = ctx.build_dir / "arch" / "x86" / "boot" / "bzImage"
+    bzimage = ctx.bzimage_path()
     build_state = {
         "updated_at": utc_now_iso(),
+        "target": ctx.target,
+        "build_dir": str(ctx.build_dir),
         "kernel_release": release,
         "bzImage": str(bzimage),
         "fragments": [str(p.name) for p in fragment_paths(ctx)] + [generated_fragment.name],
@@ -2114,6 +2402,8 @@ def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -
         "repro_backlog_stages": sorted(stages),
         "repro_backlog_case_count": len(cases),
         "repro_backlog_config_count": len(missing_only),
+        "config_seed": ctx.config_seed(),
+        "source_tree_version": source_tree_version(ctx.repo_root),
     }
     write_json(ctx.build_state_path, build_state)
 
@@ -2126,6 +2416,88 @@ def cmd_build_repro_backlog(ctx: KernelAuditContext, args: argparse.Namespace) -
 
 _FILE_CACHE: Dict[str, List[str]] = {}
 _FUNCTION_RANGE_CACHE: Dict[str, List[Tuple[int, int, str]]] = {}
+_COMPILED_SOURCE_CACHE: Dict[str, Tuple[str, ...]] = {}
+
+
+def target_requires_dead_code_pruning(target: str) -> bool:
+    profile = target_profile(target)
+    return str(profile.get("dead_code_filter", "") or "") == "compiled_sources"
+
+
+def clear_compiled_source_cache(ctx: KernelAuditContext) -> None:
+    prefix = f"{ctx.build_dir.resolve()}::"
+    for key in [item for item in _COMPILED_SOURCE_CACHE if item.startswith(prefix)]:
+        _COMPILED_SOURCE_CACHE.pop(key, None)
+
+
+def compiled_source_inventory(ctx: KernelAuditContext, *, roots: Optional[Sequence[str]] = None) -> Tuple[str, ...]:
+    effective_roots = tuple(roots or ctx.scan_roots())
+    cache_key = f"{ctx.build_dir.resolve()}::{'||'.join(effective_roots)}"
+    cached = _COMPILED_SOURCE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    if not ctx.build_dir.exists():
+        _COMPILED_SOURCE_CACHE[cache_key] = ()
+        return ()
+
+    repo_root_real = ctx.repo_root.resolve()
+    allowed_roots = effective_roots or KERNEL_SOURCE_SCAN_PREFIXES
+    compiled: Set[str] = set()
+    for cmd_file in ctx.build_dir.rglob("*.cmd"):
+        if not cmd_file.is_file():
+            continue
+        text = cmd_file.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(r"^source_[^:]+ := (.+)$", text, re.M):
+            raw_source = match.group(1).strip()
+            if not raw_source:
+                continue
+            source_path = Path(raw_source)
+            if source_path.is_absolute():
+                try:
+                    rel_path = source_path.resolve().relative_to(repo_root_real)
+                except ValueError:
+                    continue
+                rel = normalize_repo_relpath(rel_path)
+            else:
+                rel = normalize_repo_relpath(raw_source)
+            if not rel.endswith(".c"):
+                continue
+            if not path_matches_roots(rel, allowed_roots):
+                continue
+            compiled.add(rel)
+
+    result = tuple(sorted(compiled))
+    _COMPILED_SOURCE_CACHE[cache_key] = result
+    return result
+
+
+def compiled_source_to_shard(path: str) -> str:
+    rel = normalize_repo_relpath(path)
+    parts = [part for part in rel.split("/") if part]
+    if len(parts) >= 2 and not parts[1].endswith(".c"):
+        return "/".join(parts[:2])
+    return rel
+
+
+def ensure_discovery_target_ready(ctx: KernelAuditContext, *, target: str, jobs: int = 0) -> None:
+    if not target_requires_dead_code_pruning(target):
+        return
+    bzimage = ctx.bzimage_path()
+    build_config = ctx.build_dir / ".config"
+    needs_build = not build_config.exists() or not bzimage.exists()
+    if needs_build:
+        print(
+            f"[kaudit] target `{target}` requires a target-local bzImage before discovery so config-dead code "
+            "can be culled; building first"
+        )
+        cmd_build_init(ctx, argparse.Namespace(jobs=jobs))
+
+    compiled = compiled_source_inventory(ctx)
+    if not compiled:
+        raise RuntimeError(
+            f"target `{target}` has no compiled source inventory under {ctx.build_dir}; "
+            f"run `kaudit build init --target {target}` first"
+        )
 
 
 def read_lines(path: Path) -> List[str]:
@@ -2281,37 +2653,39 @@ def enclosing_function(path: Path, line_no: int) -> str:
     return "unknown_function"
 
 
-def scan_pattern_hits(repo_root: Path, target_dir: str = "fs") -> List[Dict[str, Any]]:
+def scan_pattern_hits(ctx: KernelAuditContext, target_dir: str = "fs") -> List[Dict[str, Any]]:
     target = normalize_target_name(target_dir)
-    scan_pattern = (
-        r"copy_from_user|copy_to_user|memdup_user|sockptr|nla_parse|nla_memcpy|skb_put|skb_pull|skb_copy_bits|"
-        r"kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\("
-        if target == "net"
-        else r"copy_from_user|copy_to_user|kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\("
-    )
+    roots = target_scan_roots(target)
+    pattern_key = str(target_profile(target).get("seed_pattern", "fs") or "fs")
+    scan_pattern = SCAN_PATTERNS.get(pattern_key, SCAN_PATTERNS["fs"])
     rg_cmd = [
         "rg",
         "-n",
         "--no-heading",
         scan_pattern,
-        target_dir,
+        *[root.rstrip("/") for root in roots],
     ]
-    rg_result = run_cmd(rg_cmd, cwd=repo_root, check=False)
+    rg_result = run_cmd(rg_cmd, cwd=ctx.repo_root, check=False)
     if rg_result.returncode not in (0, 1):
         raise RuntimeError(
             f"failed to scan patterns in {target_dir}: {rg_result.stdout.strip()}"
         )
     out = rg_result.stdout
     candidates: List[Dict[str, Any]] = []
+    compiled_sources = set(compiled_source_inventory(ctx, roots=roots)) if target_requires_dead_code_pruning(target) else set()
 
     for raw in out.splitlines():
         m = re.match(r"([^:]+):(\d+):(.*)", raw)
         if not m:
             continue
-        rel = m.group(1)
+        rel = normalize_repo_relpath(m.group(1))
         line_no = int(m.group(2))
         snippet = m.group(3).strip()
-        path = repo_root / rel
+        if not path_matches_roots(rel, roots):
+            continue
+        if compiled_sources and rel not in compiled_sources:
+            continue
+        path = ctx.repo_root / rel
         if not path.exists() or path.suffix != ".c":
             continue
 
@@ -2345,9 +2719,23 @@ def scan_pattern_hits(repo_root: Path, target_dir: str = "fs") -> List[Dict[str,
         )
 
     # Extra heuristic: kfree(var) followed by var dereference in nearby lines.
-    for path in (repo_root / target_dir).rglob("*.c"):
+    heuristic_paths = sorted(compiled_sources) if compiled_sources else []
+    if not heuristic_paths:
+        for root_text in roots:
+            scan_root = ctx.repo_root / root_text
+            if scan_root.is_file() and scan_root.suffix == ".c":
+                heuristic_paths.append(str(scan_root.relative_to(ctx.repo_root)))
+                continue
+            if not scan_root.exists():
+                continue
+            heuristic_paths.extend(str(path.relative_to(ctx.repo_root)) for path in scan_root.rglob("*.c"))
+    for rel in sorted(set(heuristic_paths)):
+        if not path_matches_roots(rel, roots):
+            continue
+        path = ctx.repo_root / rel
+        if not path.exists() or path.suffix != ".c":
+            continue
         lines = read_lines(path)
-        rel = str(path.relative_to(repo_root))
         for idx, line in enumerate(lines):
             m = re.search(r"\bkfree\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", line)
             if not m:
@@ -3152,21 +3540,29 @@ def collect_case_fingerprints(ctx: KernelAuditContext) -> Set[str]:
 
 
 def enumerate_target_shards(ctx: KernelAuditContext, target: str) -> List[str]:
-    root = ctx.repo_root / target
-    if root.is_file():
-        return [str(root.relative_to(ctx.repo_root))]
-    if not root.exists():
-        return []
+    profile = target_profile(target)
+    roots = target_scan_roots(target)
+    if str(profile.get("shard_source", "") or "") == "compiled":
+        compiled = compiled_source_inventory(ctx, roots=roots)
+        return sorted({compiled_source_to_shard(path) for path in compiled})
 
     shards: List[str] = []
-    for entry in sorted(root.iterdir()):
-        if entry.name.startswith("."):
+    for root_text in roots:
+        root = ctx.repo_root / root_text
+        if root.is_file():
+            shards.append(str(root.relative_to(ctx.repo_root)))
             continue
-        if entry.is_dir():
-            shards.append(str(entry.relative_to(ctx.repo_root)))
-        elif entry.suffix == ".c":
-            shards.append(str(entry.relative_to(ctx.repo_root)))
-    return shards
+        if not root.exists():
+            continue
+
+        for entry in sorted(root.iterdir()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                shards.append(str(entry.relative_to(ctx.repo_root)))
+            elif entry.suffix == ".c":
+                shards.append(str(entry.relative_to(ctx.repo_root)))
+    return sorted(set(shards))
 
 
 def select_next_shards(ctx: KernelAuditContext, target: str, limit: int) -> List[str]:
@@ -3461,7 +3857,7 @@ def discover_cases_once(
         if rc != 0:
             raise RuntimeError("knowledge refresh failed")
 
-    seed_hits = scan_pattern_hits(ctx.repo_root, target_dir=target)
+    seed_hits = scan_pattern_hits(ctx, target_dir=target)
     known = load_known_signatures(ctx)
     seen = set(campaign.get("seen_locations", []))
     fingerprints = collect_case_fingerprints(ctx)
@@ -3618,6 +4014,12 @@ def run_single_cycle(
     backlog_only = bool(getattr(args, "backlog_only", False))
     oldest_first = bool(getattr(args, "oldest_first", False))
     audit_workers = max(1, as_int(getattr(args, "audit_workers", DEFAULT_AUDIT_WORKERS), DEFAULT_AUDIT_WORKERS))
+    if not backlog_only:
+        ensure_discovery_target_ready(
+            ctx,
+            target=target,
+            jobs=max(0, as_int(getattr(args, "jobs", 0), 0)),
+        )
     selected_audit_queue = [] if backlog_only else select_next_shards(ctx, target, audit_workers)
     completed_jobs: List[Dict[str, Any]] = []
 
@@ -4297,7 +4699,7 @@ def team_preflight_artifacts_ready(ctx: KernelAuditContext, started_at_epoch: fl
         ctx.knowledge_snapshot_path.stat().st_mtime >= (started_at_epoch - margin)
     )
 
-    bzimage = ctx.build_dir / "arch" / "x86" / "boot" / "bzImage"
+    bzimage = ctx.bzimage_path()
     build_ok = False
     if bzimage.exists() and bzimage.stat().st_mtime >= (started_at_epoch - margin):
         build_ok = True
@@ -4415,7 +4817,7 @@ def run_team_preflight(
 
 
 def run_local_preflight(ctx: KernelAuditContext, jobs: int, force_refresh: bool, force_build: bool) -> None:
-    bz = ctx.build_dir / "arch" / "x86" / "boot" / "bzImage"
+    bz = ctx.bzimage_path()
     if force_refresh or not (ctx.syzbot_path.exists() and ctx.cve_path.exists()):
         cmd_knowledge_refresh(ctx, argparse.Namespace())
     if force_build or not bz.exists():
@@ -4579,13 +4981,12 @@ def ensure_case_exists(ctx: KernelAuditContext, case_id: str) -> Dict[str, Any]:
 
 def pipeline_target(ctx: KernelAuditContext) -> str:
     state = load_pipeline_state(ctx)
-    target = str(state.get("target", "") or "fs").strip()
-    return target or "fs"
+    return normalize_target_name(str(state.get("target", "") or "fs").strip() or "fs")
 
 
 def refresh_case_queues(ctx: KernelAuditContext, *, target: Optional[str] = None) -> Dict[str, Any]:
     state = load_pipeline_state(ctx)
-    resolved_target = str(target or state.get("target") or "fs").strip() or "fs"
+    resolved_target = normalize_target_name(str(target or state.get("target") or "fs").strip() or "fs")
     audit_width = max(1, len(state.get("audit_queue", [])) or DEFAULT_AUDIT_WORKERS)
     state["target"] = resolved_target
     state["audit_queue"] = select_next_shards(ctx, resolved_target, audit_width)
@@ -5379,6 +5780,8 @@ def cmd_repro(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     repro_fragments = [p for p in [repro_stable_fragment, extra_fragment] if p and p.exists()]
 
     if not args.skip_build:
+        ensure_target_source_compat(ctx)
+        clear_compiled_source_cache(ctx)
         if not (ctx.build_dir / ".config").exists():
             cmd_build_init(ctx, argparse.Namespace(jobs=args.jobs or 0))
         else:
@@ -5396,7 +5799,7 @@ def cmd_repro(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
                 check=True,
             )
 
-    bzimage = ctx.build_dir / "arch" / "x86" / "boot" / "bzImage"
+    bzimage = ctx.bzimage_path()
     if not bzimage.exists():
         return fail(f"bzImage not found: {bzimage}")
 
@@ -5677,11 +6080,50 @@ def build_patch_sketch(case: Dict[str, Any]) -> str:
             """\
             --- a/fs/affs/dir.c
             +++ b/fs/affs/dir.c
-            @@
-             hash_pos = (ctx->pos - 2) >> 16;
-            +if (hash_pos >= AFFS_SB(sb)->s_hashsize)
-            +    return -EINVAL;
-             chain = AFFS_HEAD(dir_bh)->table[hash_pos];
+            @@ -119,6 +119,8 @@ affs_readdir(struct file *file, struct dir_context *ctx)
+             		pr_debug("readdir() left off=%d\\n", ino);
+             		goto inside;
+             	}
+            +	if (hash_pos >= AFFS_SB(sb)->s_hashsize)
+            +		goto done;
+             
+             	ino = be32_to_cpu(AFFS_HEAD(dir_bh)->table[hash_pos]);
+             	for (i = 0; ino && i < chain_pos; i++) {
+            """
+        ).strip()
+
+    if target_path == "fs/orangefs/xattr.c":
+        return textwrap.dedent(
+            """\
+            --- a/fs/orangefs/xattr.c
+            +++ b/fs/orangefs/xattr.c
+            @@ -188,6 +188,10 @@ ssize_t orangefs_inode_getxattr(struct inode *inode, const char *name,
+             	 * Length returned includes null terminator.
+             	 */
+             	length = new_op->downcall.resp.getxattr.val_sz;
+            +	if (length < 0 || length > ORANGEFS_MAX_XATTR_VALUELEN) {
+            +		ret = -EIO;
+            +		goto out_release_op;
+            +	}
+             
+             	/*
+             	 * Just return the length of the queried attribute.
+            """
+        ).strip()
+
+    if target_path == "net/6lowpan/nhc_udp.c":
+        return textwrap.dedent(
+            """\
+            --- a/net/6lowpan/nhc_udp.c
+            +++ b/net/6lowpan/nhc_udp.c
+            @@ -114,6 +114,9 @@ static int udp_compress(struct sk_buff *skb, u8 **hc_ptr)
+             static int udp_compress(struct sk_buff *skb, u8 **hc_ptr)
+             {
+            +	if (skb_transport_offset(skb) + sizeof(struct udphdr) > skb->len)
+            +		return -EINVAL;
+            +
+             	const struct udphdr *uh = udp_hdr(skb);
+             	u8 tmp;
             """
         ).strip()
 
@@ -5728,8 +6170,8 @@ def build_patch_sketch(case: Dict[str, Any]) -> str:
 
     return textwrap.dedent(
         f"""\
-        --- a/{target_path or 'fs/unknown.c'}
-        +++ b/{target_path or 'fs/unknown.c'}
+        --- a/{target_path or 'kernel/unknown.c'}
+        +++ b/{target_path or 'kernel/unknown.c'}
         @@
         +/* validate attacker-controlled size/offset/count fields before dereference/copy */
         +/* reject malformed state early with -EINVAL/-EIO/-EFSCORRUPTED as appropriate */
@@ -5755,6 +6197,27 @@ def infer_public_required_config(case: Dict[str, Any]) -> List[str]:
             inferred.append(config)
             break
     return merge_required_config(required, inferred)
+
+
+def validate_patch_text(ctx: KernelAuditContext, patch_text: str) -> Dict[str, Any]:
+    result = {
+        "apply_check_ok": False,
+        "error": "",
+    }
+    text = str(patch_text or "").strip()
+    if not text.startswith("--- a/"):
+        result["error"] = "patch text is not a unified diff"
+        return result
+    proc = run_cmd(
+        ["git", "apply", "--check", "-"],
+        cwd=ctx.repo_root,
+        check=False,
+        input_text=text + "\n",
+    )
+    result["apply_check_ok"] = proc.returncode == 0
+    if proc.returncode != 0:
+        result["error"] = proc.stdout.strip()[-2000:]
+    return result
 
 
 def build_public_report_artifacts(
@@ -5803,6 +6266,7 @@ def build_public_report_artifacts(
 
     patch_text = build_patch_sketch(case).strip() + "\n"
     write_text(patch_path, patch_text)
+    patch_validation = validate_patch_text(ctx, patch_text)
 
     last_qemu_cmd = case.get("last_qemu_cmd", [])
     qemu_cmd_text = ""
@@ -5837,9 +6301,11 @@ def build_public_report_artifacts(
         f"- kernel config summary: {config_summary_path}",
         f"- QEMU command / boot args: {qemu_cmd_path}",
         f"- root-cause patch sketch: {patch_path}",
+        f"- patch apply check: {'ok' if patch_validation.get('apply_check_ok') else 'failed'}",
         "",
         f"PoC publication assessment: {'safe' if safe_to_publish else 'withheld'}",
         f"Reason: {safe_reason}",
+        f"Patch validation error: {patch_validation.get('error') or '(none)'}",
         "",
     ]
     write_text(manifest_path, "\n".join(manifest_lines))
@@ -5854,6 +6320,8 @@ def build_public_report_artifacts(
         "kernel_config_summary_path": str(config_summary_path),
         "qemu_cmd_path": str(qemu_cmd_path),
         "patch_path": str(patch_path),
+        "patch_apply_check_ok": bool(patch_validation.get("apply_check_ok")),
+        "patch_apply_check_error": str(patch_validation.get("error") or ""),
         "manifest_path": str(manifest_path),
         "required_config": config_lines,
         "inline_poc_c": inline_poc,
@@ -6559,7 +7027,13 @@ def build_local_disclosure(case: Dict[str, Any], excerpt: str, git_head: str) ->
     domain_label = "filesystem" if target_path.startswith("fs/") else "networking" if target_path.startswith("net/") else "kernel subsystem"
     root_cause = str(case.get("root_cause", "") or case.get("verification", {}).get("proof", "") or "unknown root cause").strip()
     impact = str(case.get("impact", "") or "kernel crash / denial of service").strip()
-    default_scenario = "mounting a crafted filesystem image" if target_path.startswith("fs/") else "issuing attacker-controlled networking operations"
+    default_scenario = (
+        "mounting a crafted filesystem image"
+        if target_path.startswith("fs/")
+        else "issuing attacker-controlled networking operations"
+        if target_path.startswith("net/")
+        else "running attacker-controlled local guest operations against the configured kernel surface"
+    )
     scenario = str(case.get("attack_scenario", "") or default_scenario).strip()
     kernel_release = str(case.get("kernel_version", "") or "unknown").strip()
     trigger_cmd = str(case.get("trigger", {}).get("command", "") or "").strip() or "the generated trigger"
@@ -6708,7 +7182,7 @@ def build_email_report(
     log_file: Path,
     poc_context: Dict[str, Any],
 ) -> str:
-    subject = disclosure.get("subject") or f"[SECURITY] fs: {case['case_id']} potential memory corruption"
+    subject = disclosure.get("subject") or f"[SECURITY] kernel: {case['case_id']} potential memory corruption"
     to_line = ", ".join(as_str_list(disclosure.get("to", [])))
     cc_line = ", ".join(as_str_list(disclosure.get("cc", [])))
     body = str(disclosure.get("body_text", "") or "").strip()
@@ -7120,9 +7594,12 @@ def cmd_status(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
 
     if build_state:
         print("- build:")
+        print(f"  - build_dir: {build_state.get('build_dir')}")
         print(f"  - kernel_release: {build_state.get('kernel_release')}")
         print(f"  - bzImage: {build_state.get('bzImage')}")
         print(f"  - updated_at: {build_state.get('updated_at')}")
+        if build_state.get("config_seed"):
+            print(f"  - config_seed: {build_state.get('config_seed')}")
 
     if case_counts:
         print("- case_counts:")
@@ -7166,7 +7643,7 @@ def add_target_option(parser: argparse.ArgumentParser, *, default: str = "fs") -
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="kaudit", description="Kernel FS vulnerability audit helper (OMX)")
+    p = argparse.ArgumentParser(prog="kaudit", description="Kernel audit helper (OMX)")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("bootstrap", help="initialize workspace layout and default state")
@@ -7195,7 +7672,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     orchestrate = sub.add_parser("orchestrate", help="team-aware end-to-end single-pass workflow")
     orchestrate.add_argument("--sync-mainline", action="store_true", help="run sync-mainline before workflow")
-    orchestrate.add_argument("--target", default="fs", help="scan target path")
+    add_target_option(orchestrate)
     orchestrate.add_argument("--similarity-threshold", type=float, default=0.45)
     orchestrate.add_argument("--dispatch", choices=["auto", "team", "local"], default="auto")
     orchestrate.add_argument("--jobs", type=int, default=0)
@@ -7279,11 +7756,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     build = sub.add_parser("build", help="build operations")
     build_sub = build.add_subparsers(dest="build_cmd", required=True)
-    build_init = build_sub.add_parser("init", help="initial allmodconfig + kasan build")
+    build_init = build_sub.add_parser("init", help="initial target seed config + kasan build")
+    add_target_option(build_init)
     build_init.add_argument("--jobs", type=int, default=0, help="parallel build jobs (default: nproc)")
     build_repro_backlog = build_sub.add_parser(
         "repro-backlog",
-        help="merge required_config from repro backlog cases and build one shared bzImage",
+        help="merge required_config from repro backlog cases and build one target bzImage",
     )
     build_repro_backlog.add_argument(
         "--stages",
@@ -7307,12 +7785,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_repro_backlog.set_defaults(missing_only=True)
 
     build_init_alias = sub.add_parser("build-init", help="alias for build init")
+    add_target_option(build_init_alias)
     build_init_alias.add_argument("--config", default="allmodconfig", help="accepted for compatibility")
     build_init_alias.add_argument("--kasan", action="store_true", default=False, help="accepted for compatibility")
     build_init_alias.add_argument("--jobs", type=int, default=0, help="parallel build jobs (default: nproc)")
 
     cycle = sub.add_parser("cycle", help="run candidate discovery cycle")
-    cycle.add_argument("--target", default="fs", help="subsystem path to scan (default: fs)")
+    add_target_option(cycle)
     cycle.add_argument("--once", action="store_true", help="run exactly one cycle")
     cycle.add_argument("--loop", action="store_true", help="run continuous cycles")
     cycle.add_argument("--interval", type=int, default=900, help="loop sleep interval in seconds")

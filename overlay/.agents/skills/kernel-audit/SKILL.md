@@ -8,6 +8,7 @@ Run a practical, repeatable Linux kernel subsystem vulnerability pipeline with C
 Current built-in targets are:
 - `fs` (legacy default)
 - `net` (additive namespace; fs paths remain unchanged)
+- `kctf` (Lakitu/COS 6.12 profile with config-dead-code pruning before discovery)
 </Purpose>
 
 <Policy>
@@ -41,7 +42,7 @@ The real pipeline is:
 
 Details:
 - preflight: refresh/build/status; can run through `omx team`
-- discovery: target-specific Codex worker over the selected subsystem shards (`fs/` or `net/`), not just regex hits
+- discovery: target-specific Codex worker over the selected subsystem shards (`fs/`, `net/`, or config-pruned `kctf` compiled shards), not just regex hits
 - verification: separate Codex worker that validates root cause, reachability, novelty, and trigger contract
 - repro: Codex worker synthesizes PoC/run plan, then `kaudit` executes build + rootfs + QEMU + KASAN capture
 - disclosure: Codex worker drafts report/email from verified facts and actual logs
@@ -55,10 +56,14 @@ Details:
 - `./.omx/kernel-audit/bin/kaudit sync-mainline`
 - `./.omx/kernel-audit/bin/kaudit orchestrate --dispatch auto --target fs`
 - `./.omx/kernel-audit/bin/kaudit orchestrate --dispatch auto --target net`
+- `./.omx/kernel-audit/bin/kaudit build init --target kctf`
+- `./.omx/kernel-audit/bin/kaudit orchestrate --dispatch auto --target kctf`
 - `./.omx/kernel-audit/bin/kaudit cycle --once --dispatch auto --target fs`
 - `./.omx/kernel-audit/bin/kaudit cycle --once --dispatch auto --target net`
+- `./.omx/kernel-audit/bin/kaudit cycle --once --dispatch auto --target kctf`
 - `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target fs`
 - `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target net`
+- `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target kctf`
 - `./.omx/kernel-audit/bin/kaudit verify <case-id>`
 - `./.omx/kernel-audit/bin/kaudit rootfs prepare --mode auto`
 - `./.omx/kernel-audit/bin/kaudit repro <case-id> --rootfs-mode auto`
@@ -100,6 +105,10 @@ Use the dedicated worker prompts for stage-specific reasoning:
 - `.codex/prompts/kernel-net-verifier-worker.md`
 - `.codex/prompts/kernel-net-repro-worker.md`
 - `.codex/prompts/kernel-net-disclosure-writer.md`
+- `.codex/prompts/kernel-kctf-discovery-worker.md`
+- `.codex/prompts/kernel-kctf-verifier-worker.md`
+- `.codex/prompts/kernel-kctf-repro-worker.md`
+- `.codex/prompts/kernel-kctf-disclosure-writer.md`
 
 Each worker must emit schema-conformant JSON and must avoid hand-wavy vulnerability claims.
 </Worker_Prompts>
@@ -159,6 +168,7 @@ Every final report/email draft must include:
 <Execution_Notes>
 - Treat low-confidence discovery output as triage input, not as a confirmed bug.
 - Prefer `xhigh` worker reasoning for kernel-fs analysis.
+- `kctf` discovery first builds the target-local Lakitu-based `bzImage` and prunes config-dead code before shard selection.
 - If auto repro cannot be self-contained in QEMU, mark the case `manual_only` and record why.
 - If a human chooses to override `manual_only`, require an explicit recorded reason via `kaudit case promote <case-id> --to repro_queued --reason ...`.
 - If KASAN does not fire, do not mark the case `confirmed`.

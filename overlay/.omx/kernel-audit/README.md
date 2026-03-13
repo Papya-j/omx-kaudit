@@ -5,6 +5,7 @@ Current built-in target profiles are:
 
 - `fs` (legacy default; existing paths unchanged)
 - `net` (new target-specific namespace under `.omx/kernel-audit/`)
+- `kctf` (Lakitu/COS 6.12 profile with target-local build state and config-dead-code pruning)
 It keeps all campaign state under `.omx/kernel-audit/` and runs a bounded multi-stage pipeline:
 
 1. OMX/team-aware preflight (`sync/build/status` prerequisites)
@@ -35,7 +36,7 @@ This stage is short-lived. The team is started, preflight artifacts are produced
 Discovery is no longer just regex candidate mining.
 
 `kaudit` now:
-- shards the selected target path (`fs/` or `net/`) into auditable units
+- shards the selected target path (`fs/` or `net/`) or the config-pruned compiled `kctf` surface into auditable units
 - prioritizes unvisited/older shards
 - gathers lightweight static seeds (`copy_from_user`, allocator/free, lifetime hotspots)
 - sends each shard to a target-specific Codex discovery worker prompt
@@ -85,7 +86,7 @@ For `repro_ready` cases, `kaudit` automatically runs a **Codex repro worker** th
 
 Then `kaudit` performs:
 - config accumulation
-- `make -j$(nproc)` rebuild into the same build tree
+- `make -j$(nproc)` rebuild into the selected target build tree
 - initramfs/rootfs preparation (`busybox`, `debian`, or `auto`)
 - QEMU boot
 - guest trigger execution
@@ -177,6 +178,8 @@ Run everything from `~/Linux_kernel/linux-up`.
 ./.omx/kernel-audit/bin/kaudit rootfs prepare --mode auto
 ```
 
+For the `kctf` target, the base config is vendored from COS `lakitu_defconfig` for Linux `6.12.68`. `kaudit` will refuse to seed that target from a non-`6.12.x` source tree.
+
 ### Single-Pass Full Pipeline
 
 ```bash
@@ -193,6 +196,17 @@ Networking uses the same flow with a different target:
 ./.omx/kernel-audit/bin/kaudit orchestrate \
   --dispatch auto \
   --target net \
+  --jobs $(nproc) \
+  --worker-reasoning-effort xhigh
+```
+
+`kctf` uses a dedicated target-local build and culls config-dead code before discovery:
+
+```bash
+./.omx/kernel-audit/bin/kaudit build init --target kctf --jobs $(nproc)
+./.omx/kernel-audit/bin/kaudit orchestrate \
+  --dispatch auto \
+  --target kctf \
   --jobs $(nproc) \
   --worker-reasoning-effort xhigh
 ```
@@ -226,6 +240,20 @@ For networking:
 
 ```bash
 ./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target net \
+  --jobs $(nproc) \
+  --team-reasoning-effort xhigh \
+  --worker-reasoning-effort xhigh \
+  --audit-workers 3 \
+  --verify-workers 2 \
+  --repro-workers 1 \
+  --report-workers 1 \
+  --interval 900
+```
+
+For kCTF/Lakitu:
+
+```bash
+./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target kctf \
   --jobs $(nproc) \
   --team-reasoning-effort xhigh \
   --worker-reasoning-effort xhigh \
