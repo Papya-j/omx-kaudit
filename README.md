@@ -1,6 +1,10 @@
-# OMX Kernel FS Audit Overlay
+# OMX Kernel Audit Overlay
 
-`omx-kernel-audit-overlay` is a standalone overlay repository for running the `kaudit` Linux kernel filesystem audit workflow on top of an existing Linux kernel tree.
+`omx-kernel-audit-overlay` is a standalone overlay repository for running the `kaudit` Linux kernel subsystem audit workflow on top of an existing Linux kernel tree.
+Current built-in target profiles are:
+
+- `fs` (legacy default)
+- `net` (additive target namespace; existing fs outputs stay unchanged)
 
 It does **not** ship:
 - Linux kernel source
@@ -19,6 +23,7 @@ The installer copies only these namespaced custom files into the target kernel t
 - `.omx/kernel-audit/`
 - `.agents/skills/kernel-audit/SKILL.md`
 - `.codex/prompts/kernel-fs-*.md`
+- `.codex/prompts/kernel-net-*.md`
 
 It does not overwrite unrelated OMX, Codex, or user files.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel FS audit orchestration helper for OMX workflows.
+"""Kernel subsystem audit orchestration helper for OMX workflows.
 
 This tool is designed for the linux-up repository and stores all automation
 artifacts under .omx/kernel-audit.
@@ -103,6 +103,25 @@ FS_KEYWORDS = {
     "ramfs",
 }
 
+NET_KEYWORDS = {
+    "network",
+    "networking",
+    "net/",
+    "socket",
+    "sock",
+    "tcp",
+    "udp",
+    "ipv4",
+    "ipv6",
+    "netlink",
+    "skb",
+    "xfrm",
+    "packet",
+    "wireless",
+    "netfilter",
+    "route",
+}
+
 WEAKNESS_KEYWORDS: Dict[str, Set[str]] = {
     "uaf": {"use-after-free", "uaf", "kfree", "dangling"},
     "oob-read": {"out-of-bounds read", "slab-out-of-bounds", "oob read", "overread"},
@@ -152,10 +171,7 @@ CASE_STAGE_TO_STATUS = {
 QUEUE_ACTIVE_STAGES = {"discovered", "verified", "repro_queued", "repro_running", "repro_failed"}
 CONFIRMED_STAGES = {"confirmed", "reported"}
 
-DISCOVERY_PROMPT_NAME = "kernel-fs-discovery-worker.md"
-VERIFY_PROMPT_NAME = "kernel-fs-verifier-worker.md"
-REPRO_PROMPT_NAME = "kernel-fs-repro-worker.md"
-DISCLOSURE_PROMPT_NAME = "kernel-fs-disclosure-writer.md"
+SUPPORTED_TARGETS = ("fs", "net")
 
 DISCOVERY_SCHEMA_NAME = "discovery-worker.schema.json"
 VERIFY_SCHEMA_NAME = "verify-worker.schema.json"
@@ -214,6 +230,22 @@ CONFIG_NFSD=y
 CONFIG_PROC_FS=y
 CONFIG_SYSFS=y
 CONFIG_TMPFS=y
+"""
+
+NET_BROAD_FRAGMENT = """# Broad networking coverage baseline
+CONFIG_INET=y
+CONFIG_IPV6=y
+CONFIG_UNIX=y
+CONFIG_PACKET=y
+CONFIG_NET_NS=y
+CONFIG_NETFILTER=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_TUN=y
+CONFIG_VETH=y
+CONFIG_BRIDGE=y
+CONFIG_VLAN_8021Q=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
 """
 
 REPRO_STABLE_FRAGMENT = """# Repro-only boot stability overrides
@@ -346,6 +378,41 @@ CASE_TEMPLATE: Dict[str, Any] = {
         "command": "",
         "source_c": "",
         "run_script": "",
+    },
+}
+
+TARGET_PROFILES: Dict[str, Dict[str, Any]] = {
+    "fs": {
+        "slug": "",
+        "domain_label": "filesystem",
+        "default_target_paths": ["fs/"],
+        "default_fragments": ("base-kasan.config", "fs-broad.config"),
+        "broad_fragment_name": "fs-broad.config",
+        "broad_fragment_body": FS_BROAD_FRAGMENT,
+        "prompts": {
+            "discovery": "kernel-fs-discovery-worker.md",
+            "verify": "kernel-fs-verifier-worker.md",
+            "repro": "kernel-fs-repro-worker.md",
+            "disclosure": "kernel-fs-disclosure-writer.md",
+        },
+        "syzbot_suffix": "fs",
+        "cve_suffix": "fs",
+    },
+    "net": {
+        "slug": "net",
+        "domain_label": "networking",
+        "default_target_paths": ["net/"],
+        "default_fragments": ("base-kasan.config", "net-broad.config"),
+        "broad_fragment_name": "net-broad.config",
+        "broad_fragment_body": NET_BROAD_FRAGMENT,
+        "prompts": {
+            "discovery": "kernel-net-discovery-worker.md",
+            "verify": "kernel-net-verifier-worker.md",
+            "repro": "kernel-net-repro-worker.md",
+            "disclosure": "kernel-net-disclosure-writer.md",
+        },
+        "syzbot_suffix": "net",
+        "cve_suffix": "net",
     },
 }
 
@@ -536,22 +603,35 @@ FS_LABEL_ALIASES = {
 
 def infer_subsystem_from_target_path(target_path: str) -> str:
     parts = [part for part in str(target_path or "").split("/") if part]
-    if len(parts) >= 2 and parts[0] == "fs":
+    if len(parts) >= 2 and parts[0] in {"fs", "net"}:
         return f"{parts[0]}/{parts[1]}"
+    if len(parts) >= 3 and parts[0] == "drivers" and parts[1] == "tty":
+        return f"{parts[0]}/{parts[1]}/{parts[2]}"
+    if len(parts) >= 2 and parts[0] == "drivers" and parts[1] == "tty":
+        return "drivers/tty"
     if parts and parts[0] == "fs":
         return "fs"
-    return "fs"
+    if parts and parts[0] == "net":
+        return "net"
+    return parts[0] if parts else "kernel"
 
 
-def infer_fs_label_from_target_path(target_path: str) -> str:
+def infer_component_label_from_target_path(target_path: str) -> str:
     subsystem = infer_subsystem_from_target_path(target_path)
-    leaf = subsystem.split("/")[-1] if subsystem else "filesystem"
-    if leaf == "fs":
+    leaf = subsystem.split("/")[-1] if subsystem else "component"
+    if subsystem == "fs":
         return "filesystem"
+    if subsystem == "net":
+        return "networking"
+    if subsystem.startswith("net/"):
+        return "networking"
+    if subsystem.startswith("drivers/tty"):
+        return "tty"
     return FS_LABEL_ALIASES.get(leaf, leaf.upper())
 
 
 def infer_route_hint(case: Dict[str, Any]) -> str:
+    target_path = next(iter(as_str_list(case.get("target_paths", []))), "")
     entry_surface = " ".join(
         [
             str(case.get("entry_surface", "") or ""),
@@ -563,12 +643,26 @@ def infer_route_hint(case: Dict[str, Any]) -> str:
         return "directory enumeration"
     if "readlink" in entry_surface:
         return "symlink resolution"
+    if "netlink" in entry_surface:
+        return "netlink message handling"
+    if "setsockopt" in entry_surface:
+        return "setsockopt()"
+    if "getsockopt" in entry_surface:
+        return "getsockopt()"
+    if "recvmsg" in entry_surface or "recvfrom" in entry_surface:
+        return "recvmsg()"
+    if "sendmsg" in entry_surface or "sendto" in entry_surface:
+        return "sendmsg()"
+    if "ioctl" in entry_surface:
+        return "ioctl()"
     if "pread" in entry_surface or "read()" in entry_surface or " read " in entry_surface or "mmap" in entry_surface:
         return "file read"
     if "statfs" in entry_surface:
         return "statfs"
     if "mount" in entry_surface:
         return "mount"
+    if target_path.startswith("net/"):
+        return "networking access"
     return "filesystem access"
 
 
@@ -580,6 +674,18 @@ def infer_route_hint_from_excerpt(excerpt: str, case: Dict[str, Any]) -> str:
         return "symlink resolution"
     if "__x64_sys_mount" in haystack or "fc_mount" in haystack or "vfs_get_tree" in haystack or "path_mount" in haystack:
         return "mount"
+    if "__x64_sys_setsockopt" in haystack or "setsockopt" in haystack:
+        return "setsockopt()"
+    if "__x64_sys_getsockopt" in haystack or "getsockopt" in haystack:
+        return "getsockopt()"
+    if "__x64_sys_recvmsg" in haystack or "__sys_recvmsg" in haystack or "recvmsg" in haystack:
+        return "recvmsg()"
+    if "__x64_sys_sendmsg" in haystack or "__sys_sendmsg" in haystack or "sendmsg" in haystack:
+        return "sendmsg()"
+    if "netlink" in haystack:
+        return "netlink message handling"
+    if "__x64_sys_ioctl" in haystack or " tty_ioctl" in haystack or "ioctl" in haystack:
+        return "ioctl()"
     if "__x64_sys_pread64" in haystack or "vfs_read" in haystack or "filemap_read" in haystack or "read_folio" in haystack:
         return "file read"
     if "__x64_sys_statfs" in haystack or "statfs" in haystack:
@@ -622,20 +728,33 @@ def public_route_phrase(route_hint: str) -> str:
         "file read": "during read()",
         "symlink resolution": "during readlink()",
         "statfs": "during statfs()",
+        "recvmsg()": "during recvmsg()",
+        "sendmsg()": "during sendmsg()",
+        "setsockopt()": "during setsockopt()",
+        "getsockopt()": "during getsockopt()",
+        "netlink message handling": "during netlink processing",
+        "ioctl()": "during ioctl()",
         "filesystem access": "during filesystem access",
+        "networking access": "during networking access",
     }
     return mapping.get(route, f"during {route}" if route else "during filesystem access")
 
 
-def normalize_fs_name_for_subject(target_path: str) -> str:
+def normalize_component_name_for_subject(target_path: str) -> str:
     subsystem = infer_subsystem_from_target_path(target_path)
-    leaf = subsystem.split("/")[-1] if subsystem else "fs"
+    if subsystem == "net" or subsystem.startswith("net/"):
+        return "net"
+    if subsystem == "fs":
+        return "fs"
+    if subsystem.startswith("drivers/tty"):
+        return "tty"
+    leaf = subsystem.split("/")[-1] if subsystem else "kernel"
     return leaf.lower()
 
 
 def build_public_subject(case: Dict[str, Any], excerpt: str) -> str:
     target_path = next(iter(as_str_list(case.get("target_paths", []))), "fs/")
-    fs_name = normalize_fs_name_for_subject(target_path)
+    fs_name = normalize_component_name_for_subject(target_path)
     crash_kind = extract_crash_kind(excerpt)
     crash_func = extract_crash_function(excerpt)
     route_hint = infer_route_hint_from_excerpt(excerpt, case)
@@ -682,6 +801,8 @@ def suggest_public_recipients(ctx: KernelAuditContext, target_path: str) -> Dict
 
     if target_path.startswith("fs/"):
         to_list.append("linux-fsdevel@vger.kernel.org")
+    elif target_path.startswith("net/"):
+        to_list.append("netdev@vger.kernel.org")
 
     for addr in maintainers:
         if addr == "linux-kernel@vger.kernel.org":
@@ -839,6 +960,34 @@ def max_version(values: Iterable[str]) -> Optional[str]:
     if not cleaned:
         return None
     return max(cleaned, key=parse_semver)
+
+
+def normalize_target_name(raw: str) -> str:
+    target = str(raw or "fs").strip().lower().replace("\\", "/")
+    if target in {"", "fs"}:
+        return "fs"
+    if target == "net":
+        return "net"
+    raise RuntimeError(f"unsupported target: {raw}")
+
+
+def target_profile(target: str) -> Dict[str, Any]:
+    key = normalize_target_name(target)
+    return TARGET_PROFILES[key]
+
+
+def target_slug(target: str) -> str:
+    return target_profile(target)["slug"]
+
+
+def target_dir_name(base: str, target: str) -> str:
+    slug = target_slug(target)
+    return base if not slug else f"{base}-{slug}"
+
+
+def target_file_name(base: str, target: str) -> str:
+    slug = target_slug(target)
+    return base if not slug else f"{Path(base).stem}-{slug}{Path(base).suffix}"
 
 
 def omx_install_root() -> Optional[Path]:
@@ -1111,6 +1260,23 @@ def omx_reflections(releases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def omx_operator_tips(local: Dict[str, Any], snapshot: Dict[str, Any]) -> List[str]:
+    tips: List[str] = []
+    if bool(local.get("session_command_available")):
+        tips.append("Use `omx session` to search prior long-running audit sessions and earlier terminal transcripts.")
+    if bool(local.get("tmux_hook_available")):
+        tips.append("Use `omx tmux-hook validate` if tmux pane injection or HUD behavior looks wrong after team/backlog runs.")
+    if bool(local.get("hooks_command_available")):
+        tips.append("Use `omx hooks validate` to sanity-check installed hook plugins when lifecycle events look inconsistent.")
+    if bool(local.get("reasoning_command_available")):
+        tips.append("Use `omx reasoning xhigh` to keep the default local reasoning level aligned with the kernel-audit workflow.")
+    if snapshot.get("github_ahead_of_installable"):
+        tips.append(
+            "GitHub tag is ahead of npm. Treat `installable_latest` as the real upgrade target for `kaudit omx update` until the npm package catches up."
+        )
+    return tips
+
+
 def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
     local = omx_local_info(ctx.repo_root)
     cached = read_json(ctx.omx_upstream_path, {})
@@ -1178,6 +1344,7 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
         ),
         "update_available": update_available,
         "reflections": omx_reflections(docs_summary.get("releases", [])),
+        "operator_tips": [],
         "recommended_team_worker_launch_args": '-c model_reasoning_effort="xhigh"',
         "post_update_steps": [
             "omx setup --scope project --force",
@@ -1187,6 +1354,7 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
         "cache_fallback_used": cache_fallback_used,
         "errors": errors,
     }
+    snapshot["operator_tips"] = omx_operator_tips(local, snapshot)
     return snapshot
 
 
@@ -1234,23 +1402,25 @@ def find_repo_root(start: Path) -> Path:
 
 
 class KernelAuditContext:
-    def __init__(self, repo_root: Path) -> None:
+    def __init__(self, repo_root: Path, target: str = "fs") -> None:
         self.repo_root = repo_root
+        self.target = normalize_target_name(target)
+        self.profile = target_profile(self.target)
         self.root = repo_root / ".omx" / "kernel-audit"
         self.state_dir = self.root / "state"
         self.knowledge_dir = self.root / "knowledge"
         self.build_dir = self.root / "build" / "x86_64"
         self.fragments_dir = self.root / "config" / "fragments"
-        self.artifacts_dir = self.root / "artifacts" / "cases"
-        self.reports_dir = self.root / "reports"
+        self.artifacts_dir = self.root / "artifacts" / target_dir_name("cases", self.target)
+        self.reports_dir = self.root / target_dir_name("reports", self.target)
         self.public_reports_dir = self.reports_dir / "public"
-        self.logs_dir = self.root / "logs"
-        self.rootfs_dir = self.root / "rootfs"
+        self.logs_dir = self.root / target_dir_name("logs", self.target)
+        self.rootfs_dir = self.root / target_dir_name("rootfs", self.target)
         self.templates_dir = self.root / "templates"
 
     @property
     def campaign_path(self) -> Path:
-        return self.state_dir / "campaign.json"
+        return self.state_dir / target_file_name("campaign.json", self.target)
 
     @property
     def build_state_path(self) -> Path:
@@ -1258,23 +1428,23 @@ class KernelAuditContext:
 
     @property
     def pipeline_path(self) -> Path:
-        return self.state_dir / "pipeline.json"
+        return self.state_dir / target_file_name("pipeline.json", self.target)
 
     @property
     def shards_path(self) -> Path:
-        return self.state_dir / "shards.json"
+        return self.state_dir / target_file_name("shards.json", self.target)
 
     @property
     def syzbot_path(self) -> Path:
-        return self.knowledge_dir / "syzbot-fs.json"
+        return self.knowledge_dir / f"syzbot-{self.profile['syzbot_suffix']}.json"
 
     @property
     def cve_path(self) -> Path:
-        return self.knowledge_dir / "cve-fs.json"
+        return self.knowledge_dir / f"cve-{self.profile['cve_suffix']}.json"
 
     @property
     def knowledge_snapshot_path(self) -> Path:
-        return self.knowledge_dir / "knowledge-snapshot.json"
+        return self.knowledge_dir / target_file_name("knowledge-snapshot.json", self.target)
 
     @property
     def omx_upstream_path(self) -> Path:
@@ -1295,6 +1465,14 @@ class KernelAuditContext:
 
     def case_json_path(self, case_id: str) -> Path:
         return self.case_dir(case_id) / "case.json"
+
+    def prompt_name(self, stage: str) -> str:
+        prompts = self.profile.get("prompts", {})
+        return str(prompts.get(stage, "") or "")
+
+    def default_fragments(self) -> Tuple[str, ...]:
+        vals = self.profile.get("default_fragments", ())
+        return tuple(str(v) for v in vals)
 
     def ensure_layout(self) -> None:
         for p in [
@@ -1319,7 +1497,7 @@ class KernelAuditContext:
             "queue_depth": 0,
             "completed_cases": 0,
             "rejected_as_known": 0,
-            "next_targets": ["fs"],
+            "next_targets": [self.target],
             "seen_locations": [],
             "last_cycle_at": None,
             "last_case_id": None,
@@ -1505,11 +1683,14 @@ def refresh_campaign_metrics(ctx: KernelAuditContext, campaign: Dict[str, Any]) 
 def ensure_default_files(ctx: KernelAuditContext) -> None:
     base_frag = ctx.fragments_dir / "base-kasan.config"
     fs_frag = ctx.fragments_dir / "fs-broad.config"
+    net_frag = ctx.fragments_dir / "net-broad.config"
     repro_stable_frag = ctx.fragments_dir / REPRO_STABLE_FRAGMENT_NAME
     if not base_frag.exists():
         base_frag.write_text(BASE_KASAN_FRAGMENT, encoding="utf-8")
     if not fs_frag.exists():
         fs_frag.write_text(FS_BROAD_FRAGMENT, encoding="utf-8")
+    if not net_frag.exists():
+        net_frag.write_text(NET_BROAD_FRAGMENT, encoding="utf-8")
     if not repro_stable_frag.exists():
         repro_stable_frag.write_text(REPRO_STABLE_FRAGMENT, encoding="utf-8")
 
@@ -1573,9 +1754,9 @@ def cmd_sync_mainline(ctx: KernelAuditContext, _args: argparse.Namespace) -> int
     return 0
 
 
-def fetch_syzbot_fs(limit: int = 180) -> Dict[str, Any]:
+def fetch_syzbot_subsystem(subsystem: str, limit: int = 180) -> Dict[str, Any]:
     base_url = "https://syzkaller.appspot.com"
-    html = fetch_text(f"{base_url}/upstream/s/fs", timeout=60)
+    html = fetch_text(f"{base_url}/upstream/s/{subsystem}", timeout=60)
     extids = re.findall(r"/bug\?extid=([a-f0-9]+)", html)
     uniq: List[str] = []
     seen = set()
@@ -1613,11 +1794,19 @@ def fetch_syzbot_fs(limit: int = 180) -> Dict[str, Any]:
         )
 
     return {
-        "source": "https://syzkaller.appspot.com/upstream/s/fs",
+        "source": f"https://syzkaller.appspot.com/upstream/s/{subsystem}",
         "fetched_at": utc_now_iso(),
         "bug_count": len(bugs),
         "bugs": bugs,
     }
+
+
+def fetch_syzbot_fs(limit: int = 180) -> Dict[str, Any]:
+    return fetch_syzbot_subsystem("fs", limit=limit)
+
+
+def fetch_syzbot_net(limit: int = 240) -> Dict[str, Any]:
+    return fetch_syzbot_subsystem("net", limit=limit)
 
 
 def extract_cwe(cna: Dict[str, Any]) -> List[str]:
@@ -1630,7 +1819,7 @@ def extract_cwe(cna: Dict[str, Any]) -> List[str]:
     return sorted(set(out))
 
 
-def fetch_cve_kernel_fs(limit: int = 2000) -> Dict[str, Any]:
+def fetch_cve_kernel_target(limit: int, keywords: Set[str], source_label: str) -> Dict[str, Any]:
     url = "https://cve.circl.lu/api/search/linux/kernel"
     raw = fetch_text(url, timeout=120)
     blob = json.loads(raw)
@@ -1649,7 +1838,7 @@ def fetch_cve_kernel_fs(limit: int = 2000) -> Dict[str, Any]:
         desc_text = " ".join(d.get("value", "") for d in descs if isinstance(d, dict) and d.get("lang") == "en")
         haystack = f"{title} {desc_text}".lower()
 
-        is_fs_related = any(k in haystack for k in FS_KEYWORDS)
+        is_target_related = any(k in haystack for k in keywords)
 
         refs = []
         for ref in cna.get("references", []):
@@ -1669,7 +1858,7 @@ def fetch_cve_kernel_fs(limit: int = 2000) -> Dict[str, Any]:
             "references": refs[:8],
             "signature_tokens": sig,
         }
-        if is_fs_related:
+        if is_target_related:
             picked.append(entry)
         else:
             fallback_pool.append(entry)
@@ -1680,11 +1869,19 @@ def fetch_cve_kernel_fs(limit: int = 2000) -> Dict[str, Any]:
         picked = fallback_pool[:200]
 
     return {
-        "source": url,
+        "source": source_label,
         "fetched_at": utc_now_iso(),
         "entry_count": len(picked),
         "entries": picked,
     }
+
+
+def fetch_cve_kernel_fs(limit: int = 2000) -> Dict[str, Any]:
+    return fetch_cve_kernel_target(limit=limit, keywords=FS_KEYWORDS, source_label="cve/linux-kernel/fs")
+
+
+def fetch_cve_kernel_net(limit: int = 2500) -> Dict[str, Any]:
+    return fetch_cve_kernel_target(limit=limit, keywords=NET_KEYWORDS, source_label="cve/linux-kernel/net")
 
 
 def cmd_knowledge_refresh(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
@@ -1692,8 +1889,14 @@ def cmd_knowledge_refresh(ctx: KernelAuditContext, _args: argparse.Namespace) ->
     ensure_default_files(ctx)
     campaign = ctx.load_campaign()
 
-    syz = fetch_syzbot_fs()
-    cve = fetch_cve_kernel_fs()
+    if ctx.target == "net":
+        syz = fetch_syzbot_net()
+        cve = fetch_cve_kernel_net()
+        label = "net"
+    else:
+        syz = fetch_syzbot_fs()
+        cve = fetch_cve_kernel_fs()
+        label = "fs"
     write_json(ctx.syzbot_path, syz)
     write_json(ctx.cve_path, cve)
 
@@ -1718,14 +1921,15 @@ def cmd_knowledge_refresh(ctx: KernelAuditContext, _args: argparse.Namespace) ->
     ctx.save_campaign(campaign)
 
     print("[kaudit] knowledge refresh complete")
-    print(f"[kaudit] syzbot fs bugs: {syz.get('bug_count', 0)}")
-    print(f"[kaudit] fs-related cve entries: {cve.get('entry_count', 0)}")
+    print(f"[kaudit] target: {ctx.target}")
+    print(f"[kaudit] syzbot {label} bugs: {syz.get('bug_count', 0)}")
+    print(f"[kaudit] {label}-related cve entries: {cve.get('entry_count', 0)}")
     print(f"[kaudit] snapshot: {ctx.knowledge_snapshot_path}")
     return 0
 
 
 def fragment_paths(ctx: KernelAuditContext) -> List[Path]:
-    names = set(DEFAULT_FRAGMENT_NAMES)
+    names = set(ctx.default_fragments())
     return sorted(p for p in ctx.fragments_dir.glob("*.config") if p.is_file() and p.name in names)
 
 
@@ -2078,11 +2282,18 @@ def enclosing_function(path: Path, line_no: int) -> str:
 
 
 def scan_pattern_hits(repo_root: Path, target_dir: str = "fs") -> List[Dict[str, Any]]:
+    target = normalize_target_name(target_dir)
+    scan_pattern = (
+        r"copy_from_user|copy_to_user|memdup_user|sockptr|nla_parse|nla_memcpy|skb_put|skb_pull|skb_copy_bits|"
+        r"kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\("
+        if target == "net"
+        else r"copy_from_user|copy_to_user|kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\("
+    )
     rg_cmd = [
         "rg",
         "-n",
         "--no-heading",
-        r"copy_from_user|copy_to_user|kfree\(|kmalloc\(|kzalloc\(|krealloc\(|kvcalloc\(|vmalloc\(",
+        scan_pattern,
         target_dir,
     ]
     rg_result = run_cmd(rg_cmd, cwd=repo_root, check=False)
@@ -2106,8 +2317,14 @@ def scan_pattern_hits(repo_root: Path, target_dir: str = "fs") -> List[Dict[str,
 
         kind = "generic"
         score = 1
-        if "copy_from_user" in snippet or "copy_to_user" in snippet:
+        if "copy_from_user" in snippet or "copy_to_user" in snippet or "memdup_user" in snippet:
             kind = "usercopy-boundary"
+            score = 4
+        elif "nla_parse" in snippet or "nla_memcpy" in snippet or "sockptr" in snippet:
+            kind = "input-validation"
+            score = 4
+        elif "skb_put" in snippet or "skb_pull" in snippet or "skb_copy_bits" in snippet:
+            kind = "packet-boundary"
             score = 4
         elif "kfree(" in snippet:
             kind = "lifetime"
@@ -3135,7 +3352,7 @@ def create_case_from_candidate(
         "weights": SIMILARITY_WEIGHTS,
         "method": "weighted(token_jaccard + function_overlap + path_overlap + weakness_match)",
     }
-    case["config_fragments"] = ["base-kasan.config", "fs-broad.config"]
+    case["config_fragments"] = list(ctx.default_fragments())
     case["required_config"] = merge_required_config(
         [
             "CONFIG_KASAN=y",
@@ -3288,7 +3505,7 @@ def discover_cases_once(
         shard, payload = item
         result = run_codex_worker_json(
             ctx,
-            DISCOVERY_PROMPT_NAME,
+            ctx.prompt_name("discovery"),
             DISCOVERY_SCHEMA_NAME,
             payload,
             label=shard,
@@ -5512,7 +5729,9 @@ def build_patch_sketch(case: Dict[str, Any]) -> str:
 def infer_public_required_config(case: Dict[str, Any]) -> List[str]:
     required = case_effective_required_config(case)
     target_path = next(iter(as_str_list(case.get("target_paths", []))), "")
-    inferred: List[str] = ["CONFIG_KASAN=y", "CONFIG_BLK_DEV_LOOP=y"]
+    inferred: List[str] = ["CONFIG_KASAN=y"]
+    if target_path.startswith("fs/"):
+        inferred.append("CONFIG_BLK_DEV_LOOP=y")
     fs_map = {
         "fs/adfs/": "CONFIG_ADFS_FS=y",
         "fs/affs/": "CONFIG_AFFS_FS=y",
@@ -5962,7 +6181,7 @@ def run_verify_case(ctx: KernelAuditContext, case: Dict[str, Any], args: argpars
     }
     result = run_codex_worker_json(
         ctx,
-        VERIFY_PROMPT_NAME,
+        ctx.prompt_name("verify"),
         VERIFY_SCHEMA_NAME,
         payload,
         label=case["case_id"],
@@ -6060,7 +6279,7 @@ def plan_repro_for_case(
     }
     return run_codex_worker_json(
         ctx,
-        REPRO_PROMPT_NAME,
+        ctx.prompt_name("repro"),
         REPRO_SCHEMA_NAME,
         payload,
         label=f"{case['case_id']}-attempt-{attempt_index}",
@@ -6292,7 +6511,7 @@ def generate_disclosure_for_case(
     try:
         result = run_codex_worker_json(
             ctx,
-            DISCLOSURE_PROMPT_NAME,
+            ctx.prompt_name("disclosure"),
             DISCLOSURE_SCHEMA_NAME,
             payload,
             label=case["case_id"],
@@ -6325,10 +6544,12 @@ def generate_disclosure_for_case(
 def build_local_disclosure(case: Dict[str, Any], excerpt: str, git_head: str) -> Dict[str, Any]:
     target_path = next(iter(as_str_list(case.get("target_paths", []))), "fs/")
     subsystem = infer_subsystem_from_target_path(target_path)
-    fs_label = infer_fs_label_from_target_path(target_path)
+    fs_label = infer_component_label_from_target_path(target_path)
+    domain_label = "filesystem" if target_path.startswith("fs/") else "networking" if target_path.startswith("net/") else "kernel subsystem"
     root_cause = str(case.get("root_cause", "") or case.get("verification", {}).get("proof", "") or "unknown root cause").strip()
     impact = str(case.get("impact", "") or "kernel crash / denial of service").strip()
-    scenario = str(case.get("attack_scenario", "") or "mounting a crafted filesystem image").strip()
+    default_scenario = "mounting a crafted filesystem image" if target_path.startswith("fs/") else "issuing attacker-controlled networking operations"
+    scenario = str(case.get("attack_scenario", "") or default_scenario).strip()
     kernel_release = str(case.get("kernel_version", "") or "unknown").strip()
     trigger_cmd = str(case.get("trigger", {}).get("command", "") or "").strip() or "the generated trigger"
     kasan_line = ""
@@ -6361,7 +6582,7 @@ executed `{trigger_cmd}`, and {trigger_summary} triggered `{kasan_kind}` during 
         f"""\
 Hello Linux kernel security team,
 
-I am reporting a filesystem vulnerability that was reproduced in QEMU with KASAN enabled.
+            I am reporting a {domain_label} vulnerability that was reproduced in QEMU with KASAN enabled.
 
 Affected tree: linux-up / mainline-derived local tree
 Git head: {git_head}
@@ -6483,7 +6704,7 @@ def build_email_report(
             f"""\
             Hello kernel security team,
 
-            I am reporting a candidate filesystem vulnerability reproduced with KASAN.
+            I am reporting a candidate kernel vulnerability reproduced with KASAN.
 
             Case ID: {case['case_id']}
             Kernel release: {case.get('kernel_version') or 'unknown'}
@@ -6532,6 +6753,7 @@ def build_public_mailing_payload(
 ) -> Dict[str, Any]:
     target_path = next(iter(as_str_list(case.get("target_paths", []))), "fs/")
     subsystem = infer_subsystem_from_target_path(target_path)
+    domain_label = "filesystem" if target_path.startswith("fs/") else "networking" if target_path.startswith("net/") else "kernel"
     git_head = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_root, check=True).stdout.strip()
     kernel_release = str(case.get("kernel_version") or "unknown").strip()
     root_cause = str(case.get("root_cause") or case.get("verification", {}).get("proof") or "unknown").strip()
@@ -6567,7 +6789,7 @@ def build_public_mailing_payload(
     body_lines = [
         "Hello,",
         "",
-        "I am reporting a filesystem bug reproduced on current mainline with",
+        f"I am reporting a {domain_label} bug reproduced on current mainline with",
         "KASAN enabled.",
         "",
         f"Target file: {target_path}",
@@ -6771,6 +6993,12 @@ def print_omx_snapshot(snapshot: Dict[str, Any], limit: int = 5) -> None:
                 f"reflect: {item.get('reflection')}"
             )
 
+    operator_tips = snapshot.get("operator_tips", [])
+    if isinstance(operator_tips, list) and operator_tips:
+        print("- operator_tips:")
+        for item in operator_tips[: max(limit, 0)]:
+            print(f"  - {item}")
+
     cache_fallback_used = snapshot.get("cache_fallback_used", [])
     if isinstance(cache_fallback_used, list) and cache_fallback_used:
         print("- cache_fallback_used:")
@@ -6867,6 +7095,7 @@ def cmd_status(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
     pipeline = load_pipeline_state(ctx)
 
     print("[kaudit] status")
+    print(f"- target: {ctx.target}")
     print(f"- campaign_id: {campaign.get('campaign_id')}")
     print(f"- kernel_head: {campaign.get('kernel_head')}")
     print(f"- knowledge_snapshot: {campaign.get('knowledge_snapshot')}")
@@ -6918,13 +7147,18 @@ def cmd_status(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
     return 0
 
 
+def add_target_option(parser: argparse.ArgumentParser, *, default: str = "fs") -> None:
+    parser.add_argument("--target", choices=list(SUPPORTED_TARGETS), default=default)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kaudit", description="Kernel FS vulnerability audit helper (OMX)")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("bootstrap", help="initialize workspace layout and default state")
     sub.add_parser("sync-mainline", help="ff-only update of linux-up from origin/master")
-    sub.add_parser("status", help="show campaign/build/case status")
+    status_cmd = sub.add_parser("status", help="show campaign/build/case status")
+    add_target_option(status_cmd)
 
     omx = sub.add_parser("omx", help="check, refresh, and update oh-my-codex itself")
     omx_sub = omx.add_subparsers(dest="omx_cmd", required=True)
@@ -7020,12 +7254,14 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate.add_argument("--debian-force-cache", action="store_true")
 
     refresh = sub.add_parser("refresh", help="alias for knowledge refresh")
+    add_target_option(refresh)
     refresh.add_argument("--syzbot", action="store_true", default=False, help="accepted for compatibility")
     refresh.add_argument("--cve", action="store_true", default=False, help="accepted for compatibility")
 
     knowledge = sub.add_parser("knowledge", help="knowledge operations")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_cmd", required=True)
-    knowledge_sub.add_parser("refresh", help="refresh syzbot fs and cve knowledge caches")
+    knowledge_refresh = knowledge_sub.add_parser("refresh", help="refresh syzbot/cve knowledge caches for the selected target")
+    add_target_option(knowledge_refresh)
 
     build = sub.add_parser("build", help="build operations")
     build_sub = build.add_subparsers(dest="build_cmd", required=True)
@@ -7040,6 +7276,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="repro_queued",
         help="comma-separated case stages to collect config from (default: repro_queued)",
     )
+    add_target_option(build_repro_backlog)
     build_repro_backlog.add_argument("--jobs", type=int, default=0, help="parallel build jobs (default: nproc)")
     build_repro_backlog.add_argument("--limit", type=int, default=0, help="optional max cases to inspect")
     build_repro_backlog.add_argument(
@@ -7181,6 +7418,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = sub.add_parser("verify", help="deep root-cause verification for a case")
     verify.add_argument("case_id", help="case identifier")
+    add_target_option(verify)
     verify.add_argument("--worker-model", default="", help="explicit Codex model for verifier worker")
     verify.add_argument(
         "--worker-reasoning-effort",
@@ -7195,16 +7433,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     case_show = case_sub.add_parser("show", help="show normalized case metadata")
     case_show.add_argument("case_id", help="case identifier")
+    add_target_option(case_show)
     case_show.add_argument("--json", action="store_true", help="print raw normalized case json")
     case_show.add_argument("--recent", type=int, default=5, help="recent operator notes/actions to show")
 
     case_note = case_sub.add_parser("note", help="append an operator note to a case")
     case_note.add_argument("case_id", help="case identifier")
+    add_target_option(case_note)
     case_note.add_argument("--message", required=True, help="operator note text")
     case_note.add_argument("--category", default="note", help="free-form note category label")
 
     case_promote = case_sub.add_parser("promote", help="operator-approved stage override for a case")
     case_promote.add_argument("case_id", help="case identifier")
+    add_target_option(case_promote)
     case_promote.add_argument(
         "--to",
         dest="to_stage",
@@ -7216,6 +7457,7 @@ def build_parser() -> argparse.ArgumentParser:
     case_promote.add_argument("--force", action="store_true", help="allow non-standard stage transitions")
 
     case_backfill = case_sub.add_parser("backfill", help="rewrite normalized case schema/stage into existing cases")
+    add_target_option(case_backfill)
     case_backfill.add_argument(
         "--rewrite-notes",
         action="store_true",
@@ -7224,6 +7466,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     repro = sub.add_parser("repro", help="boot qemu and run case trigger")
     repro.add_argument("case_id", help="case identifier")
+    add_target_option(repro)
     repro.add_argument("--timeout", type=int, default=240, help="qemu runtime timeout seconds")
     repro.add_argument("--jobs", type=int, default=0, help="parallel build jobs before repro")
     repro.add_argument("--skip-build", action="store_true", help="skip kernel rebuild before qemu run")
@@ -7282,6 +7525,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report", help="generate markdown report for a case")
     report.add_argument("case_id", help="case identifier")
+    add_target_option(report)
     report.add_argument("--worker-model", default="", help="explicit Codex model for disclosure writer worker")
     report.add_argument(
         "--worker-reasoning-effort",
@@ -7304,11 +7548,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     public_report = sub.add_parser("public-report", help="generate plain-text public mailing drafts for a case")
     public_report.add_argument("case_id", help="case identifier")
+    add_target_option(public_report)
 
     public_report_batch = sub.add_parser(
         "public-report-batch",
         help="generate plain-text public mailing drafts for reported cases",
     )
+    add_target_option(public_report_batch)
     public_report_batch.add_argument("--stages", default="reported", help="comma-separated stages to scan (default: reported)")
     public_report_batch.add_argument("--limit", type=int, default=0, help="limit number of matching cases (0 = all)")
     public_report_batch.add_argument("--oldest-first", action="store_true", help="process oldest matching cases first")
@@ -7318,6 +7564,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="refresh knowledge and compare a confirmed/reported case against latest public signals before disclosure",
     )
     pre_disclose.add_argument("case_id", help="case identifier")
+    add_target_option(pre_disclose)
     pre_disclose.add_argument("--refresh", dest="refresh", action="store_true", help="refresh knowledge snapshot before checking")
     pre_disclose.add_argument("--no-refresh", dest="refresh", action="store_false", help="reuse existing knowledge snapshot when available")
     pre_disclose.set_defaults(refresh=True)
@@ -7333,6 +7580,7 @@ def build_parser() -> argparse.ArgumentParser:
         "pre-disclose-batch",
         help="run duplicate checks for reported/confirmed cases outside the loop and write batch snapshots",
     )
+    add_target_option(pre_disclose_batch)
     pre_disclose_batch.add_argument("--stages", default=PRE_DISCLOSE_BATCH_STAGES_DEFAULT, help="comma-separated stages to scan (default: reported)")
     pre_disclose_batch.add_argument("--limit", type=int, default=0, help="limit number of matching cases (0 = all)")
     pre_disclose_batch.add_argument("--refresh", dest="refresh", action="store_true", help="refresh knowledge snapshot before checking")
@@ -7349,6 +7597,10 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def resolve_command_target(args: argparse.Namespace) -> str:
+    return normalize_target_name(str(getattr(args, "target", "fs") or "fs"))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -7358,7 +7610,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except RuntimeError as exc:
         return fail(str(exc))
 
-    ctx = KernelAuditContext(repo_root)
+    ctx = KernelAuditContext(repo_root, resolve_command_target(args))
 
     try:
         if args.command == "bootstrap":

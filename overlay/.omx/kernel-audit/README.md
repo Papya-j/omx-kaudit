@@ -1,10 +1,14 @@
 # Kernel Audit Workflow (OMX + kaudit)
 
-`kaudit` is a Codex-first kernel filesystem audit orchestrator for `linux-up`.
+`kaudit` is a Codex-first kernel subsystem audit orchestrator for `linux-up`.
+Current built-in target profiles are:
+
+- `fs` (legacy default; existing paths unchanged)
+- `net` (new target-specific namespace under `.omx/kernel-audit/`)
 It keeps all campaign state under `.omx/kernel-audit/` and runs a bounded multi-stage pipeline:
 
 1. OMX/team-aware preflight (`sync/build/status` prerequisites)
-2. Codex discovery workers for kernel-fs root-cause hunting
+2. Codex discovery workers for target-specific root-cause hunting
 3. Codex verifier workers for duplicate/root-cause triage
 4. Codex repro planners for PoC, initramfs overlay, QEMU/KASAN execution
 5. Codex disclosure writers for Markdown + `.eml` draft generation
@@ -31,10 +35,10 @@ This stage is short-lived. The team is started, preflight artifacts are produced
 Discovery is no longer just regex candidate mining.
 
 `kaudit` now:
-- shards `fs/` into auditable units (`fs/<subdir>` or standalone files)
+- shards the selected target path (`fs/` or `net/`) into auditable units
 - prioritizes unvisited/older shards
 - gathers lightweight static seeds (`copy_from_user`, allocator/free, lifetime hotspots)
-- sends each shard to a **Codex discovery worker** with a professional kernel-fs prompt
+- sends each shard to a target-specific Codex discovery worker prompt
 - requires structured JSON output with:
   - path
   - function
@@ -183,6 +187,16 @@ Run everything from `~/Linux_kernel/linux-up`.
   --worker-reasoning-effort xhigh
 ```
 
+Networking uses the same flow with a different target:
+
+```bash
+./.omx/kernel-audit/bin/kaudit orchestrate \
+  --dispatch auto \
+  --target net \
+  --jobs $(nproc) \
+  --worker-reasoning-effort xhigh
+```
+
 This runs:
 - preflight
 - one discovery cycle
@@ -198,6 +212,20 @@ Inside `tmux`:
 tmux new -s kaudit
 cd ~/Linux_kernel/linux-up
 ./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target fs \
+  --jobs $(nproc) \
+  --team-reasoning-effort xhigh \
+  --worker-reasoning-effort xhigh \
+  --audit-workers 3 \
+  --verify-workers 2 \
+  --repro-workers 1 \
+  --report-workers 1 \
+  --interval 900
+```
+
+For networking:
+
+```bash
+./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target net \
   --jobs $(nproc) \
   --team-reasoning-effort xhigh \
   --worker-reasoning-effort xhigh \
@@ -295,6 +323,7 @@ Check status:
 
 ```bash
 ./.omx/kernel-audit/bin/kaudit status
+./.omx/kernel-audit/bin/kaudit status --target net
 ```
 
 ## Important Flags

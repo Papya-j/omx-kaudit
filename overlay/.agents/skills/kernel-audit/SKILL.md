@@ -4,7 +4,10 @@ description: Linux kernel auditing workflow for bootstrap, multi-stage Codex tri
 ---
 
 <Purpose>
-Run a practical, repeatable Linux kernel filesystem vulnerability pipeline with Codex as the analysis authority.
+Run a practical, repeatable Linux kernel subsystem vulnerability pipeline with Codex as the analysis authority.
+Current built-in targets are:
+- `fs` (legacy default)
+- `net` (additive namespace; fs paths remain unchanged)
 </Purpose>
 
 <Policy>
@@ -38,7 +41,7 @@ The real pipeline is:
 
 Details:
 - preflight: refresh/build/status; can run through `omx team`
-- discovery: professional kernel-fs Codex worker over `fs/` shards, not just regex hits
+- discovery: target-specific Codex worker over the selected subsystem shards (`fs/` or `net/`), not just regex hits
 - verification: separate Codex worker that validates root cause, reachability, novelty, and trigger contract
 - repro: Codex worker synthesizes PoC/run plan, then `kaudit` executes build + rootfs + QEMU + KASAN capture
 - disclosure: Codex worker drafts report/email from verified facts and actual logs
@@ -51,8 +54,11 @@ Details:
 - `./.omx/kernel-audit/bin/kaudit omx update --force-setup`
 - `./.omx/kernel-audit/bin/kaudit sync-mainline`
 - `./.omx/kernel-audit/bin/kaudit orchestrate --dispatch auto --target fs`
+- `./.omx/kernel-audit/bin/kaudit orchestrate --dispatch auto --target net`
 - `./.omx/kernel-audit/bin/kaudit cycle --once --dispatch auto --target fs`
+- `./.omx/kernel-audit/bin/kaudit cycle --once --dispatch auto --target net`
 - `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target fs`
+- `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target net`
 - `./.omx/kernel-audit/bin/kaudit verify <case-id>`
 - `./.omx/kernel-audit/bin/kaudit rootfs prepare --mode auto`
 - `./.omx/kernel-audit/bin/kaudit repro <case-id> --rootfs-mode auto`
@@ -90,6 +96,10 @@ Use the dedicated worker prompts for stage-specific reasoning:
 - `.codex/prompts/kernel-fs-verifier-worker.md`
 - `.codex/prompts/kernel-fs-repro-worker.md`
 - `.codex/prompts/kernel-fs-disclosure-writer.md`
+- `.codex/prompts/kernel-net-discovery-worker.md`
+- `.codex/prompts/kernel-net-verifier-worker.md`
+- `.codex/prompts/kernel-net-repro-worker.md`
+- `.codex/prompts/kernel-net-disclosure-writer.md`
 
 Each worker must emit schema-conformant JSON and must avoid hand-wavy vulnerability claims.
 </Worker_Prompts>
