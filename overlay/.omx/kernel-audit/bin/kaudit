@@ -879,6 +879,12 @@ def omx_local_info(repo_root: Path) -> Dict[str, Any]:
         "team_api_available": False,
         "team_api_event_query_available": False,
         "team_api_monitor_snapshot_available": False,
+        "session_command_available": False,
+        "resume_command_available": False,
+        "tmux_hook_available": False,
+        "hooks_command_available": False,
+        "reasoning_command_available": False,
+        "agents_init_available": False,
         "notifications_configured": False,
     }
 
@@ -901,6 +907,14 @@ def omx_local_info(repo_root: Path) -> Dict[str, Any]:
     m_platform = re.search(r"Platform:\s*([^\n]+)", version_out)
     if m_platform:
         info["platform"] = m_platform.group(1).strip()
+
+    help_out = run_cmd(["omx", "--help"], cwd=Path.cwd(), check=False).stdout
+    info["session_command_available"] = re.search(r"^\s*omx session\b", help_out, re.M) is not None
+    info["resume_command_available"] = re.search(r"^\s*omx resume\b", help_out, re.M) is not None
+    info["tmux_hook_available"] = re.search(r"^\s*omx tmux-hook\b", help_out, re.M) is not None
+    info["hooks_command_available"] = re.search(r"^\s*omx hooks\b", help_out, re.M) is not None
+    info["reasoning_command_available"] = re.search(r"^\s*omx reasoning\b", help_out, re.M) is not None
+    info["agents_init_available"] = re.search(r"^\s*omx agents-init\b", help_out, re.M) is not None
 
     reasoning_out = run_cmd(["omx", "reasoning"], cwd=Path.cwd(), check=False).stdout
     m_reasoning = re.search(r"Current model_reasoning_effort:\s*([A-Za-z0-9_-]+)", reasoning_out)
@@ -1135,10 +1149,18 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
             str(docs_summary.get("docs_version", "") or ""),
         ]
     )
+    installable_latest = normalize_version(str(npm_latest.get("version", "") or "")) or None
     installed = normalize_version(str(local.get("installed_version", "") or ""))
     if installed and (not upstream_latest or compare_versions(installed, upstream_latest) > 0):
         upstream_latest = installed
-    update_available = bool(installed and upstream_latest and compare_versions(installed, upstream_latest) < 0)
+    if installed and (not installable_latest or compare_versions(installed, installable_latest) > 0):
+        installable_latest = installed
+    update_available = bool(installed and installable_latest and compare_versions(installed, installable_latest) < 0)
+    github_ahead_of_installable = bool(
+        github_latest.get("version")
+        and installable_latest
+        and compare_versions(str(github_latest.get("version", "") or ""), installable_latest) > 0
+    )
 
     snapshot = {
         "generated_at": utc_now_iso(),
@@ -1147,6 +1169,8 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
         "npm_latest": npm_latest,
         "docs_summary": docs_summary,
         "upstream_latest": upstream_latest,
+        "installable_latest": installable_latest,
+        "github_ahead_of_installable": github_ahead_of_installable,
         "docs_lagging": bool(
             docs_summary.get("docs_version")
             and upstream_latest
@@ -1169,8 +1193,6 @@ def omx_snapshot(ctx: KernelAuditContext) -> Dict[str, Any]:
 def omx_live_release_versions(snapshot: Dict[str, Any]) -> List[str]:
     cache_fallback_used = {str(item) for item in snapshot.get("cache_fallback_used", []) if item}
     versions: List[str] = []
-    if "github_latest" not in cache_fallback_used:
-        versions.append(normalize_version(str(snapshot.get("github_latest", {}).get("version", "") or "")))
     if "npm_latest" not in cache_fallback_used:
         versions.append(normalize_version(str(snapshot.get("npm_latest", {}).get("version", "") or "")))
     return [item for item in versions if item]
@@ -1191,8 +1213,8 @@ def omx_resolve_update_target(ctx: KernelAuditContext, requested_version: str) -
     cached = read_json(ctx.omx_upstream_path, {})
     cached_target = normalize_version(
         str(
-            cached.get("npm_latest", {}).get("version", "")
-            or cached.get("github_latest", {}).get("version", "")
+            cached.get("installable_latest", "")
+            or cached.get("npm_latest", {}).get("version", "")
             or cached.get("upstream_latest", "")
             or ""
         )
@@ -6720,6 +6742,8 @@ def print_omx_snapshot(snapshot: Dict[str, Any], limit: int = 5) -> None:
     print(f"- reasoning_effort: {installed.get('reasoning_effort')}")
     print(f"- github_latest: {github_latest.get('version')}")
     print(f"- npm_latest: {npm_latest.get('version')}")
+    print(f"- installable_latest: {snapshot.get('installable_latest')}")
+    print(f"- github_ahead_of_installable: {snapshot.get('github_ahead_of_installable')}")
     print(f"- docs_latest: {docs_summary.get('docs_version')}")
     print(f"- docs_lagging: {snapshot.get('docs_lagging')}")
     print(f"- upstream_latest: {snapshot.get('upstream_latest')}")
@@ -6729,6 +6753,12 @@ def print_omx_snapshot(snapshot: Dict[str, Any], limit: int = 5) -> None:
     print(f"- team_api_available: {installed.get('team_api_available')}")
     print(f"- team_api_event_query_available: {installed.get('team_api_event_query_available')}")
     print(f"- team_api_monitor_snapshot_available: {installed.get('team_api_monitor_snapshot_available')}")
+    print(f"- session_command_available: {installed.get('session_command_available')}")
+    print(f"- resume_command_available: {installed.get('resume_command_available')}")
+    print(f"- tmux_hook_available: {installed.get('tmux_hook_available')}")
+    print(f"- hooks_command_available: {installed.get('hooks_command_available')}")
+    print(f"- reasoning_command_available: {installed.get('reasoning_command_available')}")
+    print(f"- agents_init_available: {installed.get('agents_init_available')}")
     print(f"- notifications_configured: {installed.get('notifications_configured')}")
     print(f"- recommended_team_worker_launch_args: {snapshot.get('recommended_team_worker_launch_args')}")
 
@@ -6775,10 +6805,11 @@ def cmd_omx_status(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     snapshot["installed"] = omx_local_info(ctx.repo_root)
     installed_version = normalize_version(str(snapshot["installed"].get("installed_version", "") or ""))
     upstream_latest = normalize_version(str(snapshot.get("upstream_latest", "") or ""))
+    installable_latest = normalize_version(str(snapshot.get("installable_latest", "") or ""))
     docs_latest = normalize_version(str(snapshot.get("docs_summary", {}).get("docs_version", "") or ""))
     snapshot["docs_lagging"] = bool(docs_latest and upstream_latest and compare_versions(docs_latest, upstream_latest) < 0)
     snapshot["update_available"] = bool(
-        installed_version and upstream_latest and compare_versions(installed_version, upstream_latest) < 0
+        installed_version and installable_latest and compare_versions(installed_version, installable_latest) < 0
     )
     print_omx_snapshot(snapshot, limit=args.limit)
     print(f"[kaudit] omx snapshot: {ctx.omx_upstream_path}")
@@ -6870,13 +6901,15 @@ def cmd_status(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
     if isinstance(omx_snapshot, dict) and omx_snapshot:
         installed = omx_local_info(ctx.repo_root)
         upstream_latest = normalize_version(str(omx_snapshot.get("upstream_latest", "") or ""))
+        installable_latest = normalize_version(str(omx_snapshot.get("installable_latest", "") or ""))
         installed_version = normalize_version(str(installed.get("installed_version", "") or ""))
         update_available = bool(
-            installed_version and upstream_latest and compare_versions(installed_version, upstream_latest) < 0
+            installed_version and installable_latest and compare_versions(installed_version, installable_latest) < 0
         )
         print("- omx:")
         print(f"  - installed_version: {installed_version}")
         print(f"  - upstream_latest: {upstream_latest}")
+        print(f"  - installable_latest: {installable_latest}")
         print(f"  - update_available: {update_available}")
         print(f"  - team_api_available: {installed.get('team_api_available')}")
         print(f"  - notifications_configured: {installed.get('notifications_configured')}")
