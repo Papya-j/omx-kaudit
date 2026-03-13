@@ -4240,7 +4240,12 @@ def build_team_env(args: argparse.Namespace, global_opts: Dict[str, Any]) -> Dic
     if not team_model and bool(global_opts.get("spark")):
         team_model = OMX_SPARK_MODEL
 
-    reasoning_effort = str(getattr(args, "team_reasoning_effort", "") or global_opts.get("reasoning_effort", "") or "")
+    reasoning_effort = str(
+        getattr(args, "team_reasoning_effort", "")
+        or getattr(args, "worker_reasoning_effort", "")
+        or global_opts.get("reasoning_effort", "")
+        or CODEX_WORKER_REASONING_DEFAULT
+    )
     worker_launch = build_team_worker_launch_args(
         str(getattr(args, "team_worker_launch_args", "") or os.environ.get("OMX_TEAM_WORKER_LAUNCH_ARGS", "")),
         team_model,
