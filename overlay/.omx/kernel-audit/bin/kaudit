@@ -6703,7 +6703,40 @@ def update_pipeline_snapshot(
     return state
 
 
-def apply_verification_to_case(case: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+def kctf_target_incompatibility_reason(case: Dict[str, Any]) -> str:
+    text = "\n".join(
+        [
+            str(case.get("root_cause", "") or ""),
+            str(case.get("impact", "") or ""),
+            str(case.get("attack_scenario", "") or ""),
+            str(case.get("verification", {}).get("trigger_contract", "") or ""),
+            str(case.get("verification", {}).get("repro_requirements", "") or ""),
+            str(case.get("analysis", {}).get("candidate", {}).get("entry_surface", "") or ""),
+        ]
+    ).lower()
+
+    nvme_markers = (
+        "nvme_uring_cmd_io",
+        "nvme uring",
+        "/dev/nvme",
+        "metadata-formatted nvme",
+        "metadata capable nvme",
+        "pi/metadata",
+        "blk_rq_integrity_map_user",
+        "metadata-enabled nvme",
+        "metadata enabled nvme",
+        "nvme namespace",
+    )
+    if any(marker in text for marker in nvme_markers):
+        return (
+            "kernelCTF-target incompatible: this trigger requires a host-provided metadata-capable NVMe controller/"
+            "namespace, but the current public kernelCTF QEMU environment uses virtio root/flag drives and does not "
+            "expose an NVMe namespace with metadata enabled."
+        )
+    return ""
+
+
+def apply_verification_to_case(ctx: KernelAuditContext, case: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
     case = normalize_case(case)
     verdict = str(result.get("verdict", "reject") or "reject").strip().lower()
     if verdict not in {"reject", "manual_only", "repro_ready"}:
@@ -6723,6 +6756,15 @@ def apply_verification_to_case(case: Dict[str, Any], result: Dict[str, Any]) -> 
     case["impact"] = str(result.get("impact", "") or case.get("impact", ""))
     case["attack_scenario"] = str(result.get("attack_scenario", "") or case.get("attack_scenario", ""))
     case["required_config"] = merge_required_config(case.get("required_config", []), as_str_list(result.get("required_config", [])))
+
+    if ctx.target == "kctf":
+        incompat_reason = kctf_target_incompatibility_reason(case)
+        if incompat_reason:
+            case["verification"]["manual_constraints"] = incompat_reason
+            case["stage"] = "manual_only"
+            sync_case_status(case)
+            case["last_verified_at"] = utc_now_iso()
+            return case
 
     if verdict == "reject":
         case["stage"] = "rejected"
@@ -6761,7 +6803,7 @@ def run_verify_case(ctx: KernelAuditContext, case: Dict[str, Any], args: argpars
         timeout=max(120, as_int(getattr(args, "worker_timeout", CODEX_WORKER_TIMEOUT_DEFAULT), CODEX_WORKER_TIMEOUT_DEFAULT)),
         case_id=case["case_id"],
     )
-    case = apply_verification_to_case(case, result)
+    case = apply_verification_to_case(ctx, case, result)
     save_case(ctx, case)
     return case
 
