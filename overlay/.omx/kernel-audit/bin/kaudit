@@ -3537,6 +3537,14 @@ def missing_required_config(ctx: KernelAuditContext, case: Dict[str, Any]) -> Li
         return case_blocking_repro_config(case)
     missing: List[str] = []
     for item in case_blocking_repro_config(case):
+        req = normalize_config_entry(item)
+        # Hidden/implicit kernel symbols may not appear in the final .config even when
+        # they are effectively selected by dependent features. Do not block repro on
+        # such absent symbols; only block when the symbol is explicitly present and
+        # unsatisfied.
+        m = re.fullmatch(r"CONFIG_([A-Za-z0-9_]+)=(.*)", req or "")
+        if m and m.group(1) not in config_map:
+            continue
         if not config_requirement_satisfied(item, config_map):
             missing.append(item)
     return missing
