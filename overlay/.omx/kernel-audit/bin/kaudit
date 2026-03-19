@@ -1216,6 +1216,9 @@ def omx_local_info(repo_root: Path) -> Dict[str, Any]:
         "team_api_monitor_snapshot_available": False,
         "session_command_available": False,
         "resume_command_available": False,
+        "explore_command_available": False,
+        "sparkshell_command_available": False,
+        "autoresearch_command_available": False,
         "tmux_hook_available": False,
         "hooks_command_available": False,
         "reasoning_command_available": False,
@@ -1246,6 +1249,9 @@ def omx_local_info(repo_root: Path) -> Dict[str, Any]:
     help_out = run_cmd(["omx", "--help"], cwd=Path.cwd(), check=False).stdout
     info["session_command_available"] = re.search(r"^\s*omx session\b", help_out, re.M) is not None
     info["resume_command_available"] = re.search(r"^\s*omx resume\b", help_out, re.M) is not None
+    info["explore_command_available"] = re.search(r"^\s*omx explore\b", help_out, re.M) is not None
+    info["sparkshell_command_available"] = re.search(r"^\s*omx sparkshell\b", help_out, re.M) is not None
+    info["autoresearch_command_available"] = re.search(r"^\s*omx autoresearch\b", help_out, re.M) is not None
     info["tmux_hook_available"] = re.search(r"^\s*omx tmux-hook\b", help_out, re.M) is not None
     info["hooks_command_available"] = re.search(r"^\s*omx hooks\b", help_out, re.M) is not None
     info["reasoning_command_available"] = re.search(r"^\s*omx reasoning\b", help_out, re.M) is not None
@@ -1450,6 +1456,12 @@ def omx_operator_tips(local: Dict[str, Any], snapshot: Dict[str, Any]) -> List[s
     tips: List[str] = []
     if bool(local.get("session_command_available")):
         tips.append("Use `omx session` to search prior long-running audit sessions and earlier terminal transcripts.")
+    if bool(local.get("explore_command_available")):
+        tips.append("Use `omx explore` for fast read-only shard mapping before changing discovery prompts or validating a manual_only case.")
+    if bool(local.get("sparkshell_command_available")):
+        tips.append("Use `omx sparkshell --tmux-pane <pane>` to summarize a noisy tmux pane or long QEMU/build output without leaving the terminal workflow.")
+    if bool(local.get("autoresearch_command_available")):
+        tips.append("Use `omx autoresearch` for duplicate-analysis side lanes or patch-history research, but keep root-cause and disclosure authority in Codex workers.")
     if bool(local.get("tmux_hook_available")):
         tips.append("Use `omx tmux-hook validate` if tmux pane injection or HUD behavior looks wrong after team/backlog runs.")
     if bool(local.get("hooks_command_available")):
@@ -4329,6 +4341,12 @@ def cleanup_team_runtime(
             notes.append(f"{team_name}:api_cleanup={bool(cleanup and cleanup.get('ok') is True)}")
         except Exception as exc:
             notes.append(f"{team_name}:api_cleanup_error={exc}")
+        if aggressive:
+            try:
+                orphan = team_api_call(ctx, "orphan-cleanup", {"team_name": team_name})
+                notes.append(f"{team_name}:orphan_cleanup={bool(orphan and orphan.get('ok') is True)}")
+            except Exception as exc:
+                notes.append(f"{team_name}:orphan_cleanup_error={exc}")
     if aggressive:
         try:
             cancel = run_cmd(["omx", "cancel"], cwd=ctx.repo_root, check=False)
