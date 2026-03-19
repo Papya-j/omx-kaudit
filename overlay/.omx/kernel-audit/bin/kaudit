@@ -3510,9 +3510,17 @@ def select_repro_batch_cases(
     args: argparse.Namespace,
     limit: int,
 ) -> Tuple[List[Dict[str, Any]], List[Tuple[str, List[str]]]]:
+    max_attempts = max(1, as_int(getattr(args, "repro_attempts", 3), 3))
+    pending_all = collect_cases_by_stage(ctx, {"repro_queued", "repro_failed"})
+    pending_all = [
+        case
+        for case in pending_all
+        if case_stage(case) == "repro_queued"
+        or len(case.get("repro_attempts", []) if isinstance(case.get("repro_attempts"), list) else []) < max_attempts
+    ]
     pending_all = sorted(
-        collect_cases_by_stage(ctx, {"repro_queued"}),
-        key=lambda item: str(item.get("last_verified_at", item.get("created_at", ""))),
+        pending_all,
+        key=lambda item: str(item.get("last_repro_at", item.get("last_verified_at", item.get("created_at", "")))),
         reverse=not bool(getattr(args, "oldest_first", False)),
     )
     selected: List[Dict[str, Any]] = []
@@ -7091,8 +7099,9 @@ def cmd_repro_cycle(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     try:
         while True:
             iteration += 1
-            pending = collect_cases_by_stage(ctx, {"repro_queued", "repro_failed"})
-            if not pending:
+            limit = max(1, as_int(getattr(args, "repro_workers", DEFAULT_REPRO_WORKERS), DEFAULT_REPRO_WORKERS))
+            pending, skipped_missing_config = select_repro_batch_cases(ctx, args, limit)
+            if not pending and not skipped_missing_config:
                 if once:
                     print("[kaudit] repro-cycle: no pending cases")
                     break
@@ -7101,7 +7110,10 @@ def cmd_repro_cycle(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
                 time.sleep(interval)
                 continue
 
-            print(f"[kaudit] repro-cycle iteration {iteration}: {len(pending)} candidate(s)")
+            print(
+                f"[kaudit] repro-cycle iteration {iteration}: "
+                f"eligible={len(pending)} skipped_missing_config={len(skipped_missing_config)}"
+            )
             confirmed_ids = run_repro_batch(ctx, args)
             if confirmed_ids:
                 print(f"[kaudit] repro-cycle confirmed: {confirmed_ids}")
