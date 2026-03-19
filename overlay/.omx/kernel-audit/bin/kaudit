@@ -1631,6 +1631,10 @@ class KernelAuditContext:
         return self.state_dir / target_file_name("pipeline.json", self.target)
 
     @property
+    def repro_cycle_path(self) -> Path:
+        return self.state_dir / target_file_name("repro-cycle.json", self.target)
+
+    @property
     def shards_path(self) -> Path:
         return self.state_dir / target_file_name("shards.json", self.target)
 
@@ -1800,6 +1804,37 @@ def append_pipeline_completed_jobs(ctx: KernelAuditContext, jobs: List[Dict[str,
     save_pipeline_state(ctx, state)
 
 
+def load_repro_cycle_state(ctx: KernelAuditContext) -> Dict[str, Any]:
+    default = {
+        "version": PIPELINE_VERSION,
+        "active": False,
+        "target": ctx.target,
+        "iteration": 0,
+        "last_iteration_at": None,
+        "last_started_at": None,
+        "last_completed_at": None,
+        "current_batch": [],
+        "skipped_missing_config": [],
+        "last_summary": "",
+        "last_confirmed_ids": [],
+        "last_error": "",
+    }
+    state = read_json(ctx.repro_cycle_path, default)
+    if not isinstance(state, dict):
+        state = deep_copy_json(default)
+    for key, value in default.items():
+        state.setdefault(key, deep_copy_json(value))
+    state["version"] = PIPELINE_VERSION
+    state["target"] = ctx.target
+    return state
+
+
+def save_repro_cycle_state(ctx: KernelAuditContext, state: Dict[str, Any]) -> None:
+    state["version"] = PIPELINE_VERSION
+    state["target"] = ctx.target
+    write_json(ctx.repro_cycle_path, state)
+
+
 def load_shards_state(ctx: KernelAuditContext) -> Dict[str, Any]:
     default = {"version": PIPELINE_VERSION, "items": {}}
     state = read_json(ctx.shards_path, default)
@@ -1927,6 +1962,8 @@ def ensure_default_files(ctx: KernelAuditContext) -> None:
         ctx.save_campaign(ctx.load_campaign())
     if not ctx.pipeline_path.exists():
         save_pipeline_state(ctx, load_pipeline_state(ctx))
+    if not ctx.repro_cycle_path.exists():
+        save_repro_cycle_state(ctx, load_repro_cycle_state(ctx))
     if not ctx.shards_path.exists():
         save_shards_state(ctx, load_shards_state(ctx))
 
@@ -7089,6 +7126,11 @@ def cmd_repro_cycle(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
     """
     ctx.ensure_layout()
     ensure_default_files(ctx)
+    repro_cycle_state = load_repro_cycle_state(ctx)
+    repro_cycle_state["active"] = True
+    repro_cycle_state["last_started_at"] = utc_now_iso()
+    repro_cycle_state["last_error"] = ""
+    save_repro_cycle_state(ctx, repro_cycle_state)
 
     # kCTF: skip build unconditionally; other targets respect --repro-skip-build
     if ctx.target == "kctf":
@@ -7101,11 +7143,32 @@ def cmd_repro_cycle(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
             iteration += 1
             limit = max(1, as_int(getattr(args, "repro_workers", DEFAULT_REPRO_WORKERS), DEFAULT_REPRO_WORKERS))
             pending, skipped_missing_config = select_repro_batch_cases(ctx, args, limit)
+            repro_cycle_state = load_repro_cycle_state(ctx)
+            repro_cycle_state["active"] = True
+            repro_cycle_state["iteration"] = iteration
+            repro_cycle_state["last_iteration_at"] = utc_now_iso()
+            repro_cycle_state["current_batch"] = [case["case_id"] for case in pending]
+            repro_cycle_state["skipped_missing_config"] = [
+                {"case_id": case_id, "missing": missing} for case_id, missing in skipped_missing_config
+            ]
+            repro_cycle_state["last_summary"] = (
+                f"eligible={len(pending)} skipped_missing_config={len(skipped_missing_config)}"
+            )
+            repro_cycle_state["last_confirmed_ids"] = []
+            save_repro_cycle_state(ctx, repro_cycle_state)
             if not pending and not skipped_missing_config:
                 if once:
+                    repro_cycle_state["active"] = False
+                    repro_cycle_state["last_completed_at"] = utc_now_iso()
+                    repro_cycle_state["last_summary"] = "no pending cases"
+                    repro_cycle_state["current_batch"] = []
+                    save_repro_cycle_state(ctx, repro_cycle_state)
                     print("[kaudit] repro-cycle: no pending cases")
                     break
                 interval = max(1, as_int(getattr(args, "interval", 60), 60))
+                repro_cycle_state["active"] = True
+                repro_cycle_state["last_summary"] = f"no pending cases; sleeping {interval}s"
+                save_repro_cycle_state(ctx, repro_cycle_state)
                 print(f"[kaudit] repro-cycle: no pending cases; sleeping {interval}s")
                 time.sleep(interval)
                 continue
@@ -7115,22 +7178,66 @@ def cmd_repro_cycle(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
                 f"eligible={len(pending)} skipped_missing_config={len(skipped_missing_config)}"
             )
             confirmed_ids = run_repro_batch(ctx, args)
+            repro_cycle_state = load_repro_cycle_state(ctx)
+            repro_cycle_state["active"] = True
+            repro_cycle_state["last_confirmed_ids"] = confirmed_ids
+            repro_cycle_state["last_completed_at"] = utc_now_iso()
+            repro_cycle_state["last_summary"] = (
+                f"eligible={len(pending)} skipped_missing_config={len(skipped_missing_config)} "
+                f"confirmed={len(confirmed_ids)}"
+            )
+            save_repro_cycle_state(ctx, repro_cycle_state)
             if confirmed_ids:
                 print(f"[kaudit] repro-cycle confirmed: {confirmed_ids}")
                 if getattr(args, "auto_report", True) and as_int(getattr(args, "report_workers", DEFAULT_REPORT_WORKERS), DEFAULT_REPORT_WORKERS) > 0:
                     run_report_batch(ctx, args)
 
             if once:
+                repro_cycle_state["active"] = False
+                repro_cycle_state["current_batch"] = []
+                repro_cycle_state["last_completed_at"] = utc_now_iso()
+                save_repro_cycle_state(ctx, repro_cycle_state)
                 break
             max_iter = getattr(args, "max_iterations", 0) or 0
             if max_iter and iteration >= max_iter:
+                repro_cycle_state["active"] = False
+                repro_cycle_state["current_batch"] = []
+                repro_cycle_state["last_completed_at"] = utc_now_iso()
+                repro_cycle_state["last_summary"] = "reached max iterations"
+                save_repro_cycle_state(ctx, repro_cycle_state)
                 print("[kaudit] repro-cycle: reached max iterations")
                 break
             interval = max(1, as_int(getattr(args, "interval", 60), 60))
+            repro_cycle_state["active"] = True
+            repro_cycle_state["last_summary"] = (
+                f"eligible={len(pending)} skipped_missing_config={len(skipped_missing_config)} "
+                f"confirmed={len(confirmed_ids)}; sleeping {interval}s"
+            )
+            save_repro_cycle_state(ctx, repro_cycle_state)
             print(f"[kaudit] repro-cycle sleeping {interval}s")
             time.sleep(interval)
     except KeyboardInterrupt:
+        repro_cycle_state = load_repro_cycle_state(ctx)
+        repro_cycle_state["active"] = False
+        repro_cycle_state["current_batch"] = []
+        repro_cycle_state["last_completed_at"] = utc_now_iso()
+        repro_cycle_state["last_summary"] = "interrupted by user"
+        save_repro_cycle_state(ctx, repro_cycle_state)
         print("\n[kaudit] repro-cycle interrupted by user")
+    except Exception as exc:
+        repro_cycle_state = load_repro_cycle_state(ctx)
+        repro_cycle_state["active"] = False
+        repro_cycle_state["current_batch"] = []
+        repro_cycle_state["last_completed_at"] = utc_now_iso()
+        repro_cycle_state["last_error"] = str(exc)
+        repro_cycle_state["last_summary"] = f"error: {exc}"
+        save_repro_cycle_state(ctx, repro_cycle_state)
+        raise
+    repro_cycle_state = load_repro_cycle_state(ctx)
+    repro_cycle_state["active"] = False
+    repro_cycle_state["current_batch"] = []
+    repro_cycle_state["last_completed_at"] = utc_now_iso()
+    save_repro_cycle_state(ctx, repro_cycle_state)
     return 0
 
 
@@ -7746,6 +7853,7 @@ def cmd_status(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
     build_state = read_json(ctx.build_state_path, {})
     case_counts = count_case_statuses(ctx)
     pipeline = load_pipeline_state(ctx)
+    repro_cycle = load_repro_cycle_state(ctx)
 
     print("[kaudit] status")
     print(f"- target: {ctx.target}")
@@ -7781,6 +7889,19 @@ def cmd_status(ctx: KernelAuditContext, _args: argparse.Namespace) -> int:
     print(f"  - repro_queue: {len(pipeline.get('repro_queue', []))}")
     print(f"  - report_queue: {len(pipeline.get('report_queue', []))}")
     print(f"  - active_jobs: {len(pipeline.get('active_jobs', []))}")
+
+    print("- repro_cycle:")
+    print(f"  - active: {repro_cycle.get('active')}")
+    print(f"  - iteration: {repro_cycle.get('iteration')}")
+    print(f"  - last_started_at: {repro_cycle.get('last_started_at')}")
+    print(f"  - last_iteration_at: {repro_cycle.get('last_iteration_at')}")
+    print(f"  - last_completed_at: {repro_cycle.get('last_completed_at')}")
+    print(f"  - current_batch: {len(repro_cycle.get('current_batch', []))}")
+    print(f"  - skipped_missing_config: {len(repro_cycle.get('skipped_missing_config', []))}")
+    print(f"  - last_confirmed_ids: {len(repro_cycle.get('last_confirmed_ids', []))}")
+    print(f"  - last_summary: {repro_cycle.get('last_summary')}")
+    if repro_cycle.get("last_error"):
+        print(f"  - last_error: {repro_cycle.get('last_error')}")
 
     omx_snapshot = read_json(ctx.omx_upstream_path, {})
     if isinstance(omx_snapshot, dict) and omx_snapshot:
