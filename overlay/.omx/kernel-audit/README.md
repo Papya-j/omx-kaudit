@@ -259,17 +259,62 @@ For kCTF/Lakitu:
   --worker-reasoning-effort xhigh \
   --audit-workers 3 \
   --verify-workers 2 \
-  --repro-workers 1 \
+  --no-auto-repro \
   --report-workers 1 \
   --interval 900
+```
+
+If you want discovery and repro/report to be split into two independent loops for `kctf`, run:
+
+```bash
+./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch local --no-preflight --target kctf \
+  --worker-reasoning-effort xhigh \
+  --audit-workers 3 \
+  --verify-workers 2 \
+  --no-auto-repro \
+  --no-auto-report \
+  --interval 120
+```
+
+```bash
+./.omx/kernel-audit/bin/kaudit repro-cycle --loop --target kctf \
+  --repro-workers 3 \
+  --repro-timeout 300 \
+  --repro-attempts 3 \
+  --worker-reasoning-effort xhigh \
+  --interval 60
 ```
 
 Behavior:
 - preflight uses OMX team if available
 - each loop iteration runs discovery
 - newly discovered cases are auto-verified
-- verified repro-ready cases are auto-reproduced
-- confirmed cases are auto-reported
+- repro is **disabled** (`--no-auto-repro`) so the discovery loop is never blocked waiting for QEMU
+
+#### kCTF Repro Cycle (parallel, separate)
+
+Because kCTF uses a pre-built vendored `bzImage`, no kernel rebuild is ever needed before QEMU.
+This means multiple QEMU instances can run simultaneously — run `repro-cycle` in a **separate terminal** in parallel with the main discovery loop:
+
+```bash
+./.omx/kernel-audit/bin/kaudit repro-cycle --loop --target kctf \
+  --repro-workers 3 \
+  --repro-timeout 300 \
+  --repro-attempts 3 \
+  --worker-reasoning-effort xhigh \
+  --interval 60
+```
+
+What this loop does:
+1. Picks all `repro_queued` cases (populated by the discovery loop's verifier)
+2. For each case, calls the Codex repro planner to synthesize a KASAN-trigger PoC from the root cause
+3. Boots QEMU with the PoC compiled into initramfs (no kernel rebuild)
+4. Runs the PoC as uid=65534 (unprivileged); CLONE_NEWUSER may be used by the PoC to reach gated surfaces
+5. Detects `BUG: KASAN:` in the serial log → marks case `confirmed`
+6. Auto-generates the disclosure report for each confirmed case
+7. Up to `--repro-workers` cases run in parallel (ThreadPoolExecutor)
+
+The two loops share the same case state directory and are safe to run simultaneously.
 
 ### Manual Stage Control
 

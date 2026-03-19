@@ -4176,8 +4176,9 @@ def run_single_cycle(
             set_pipeline_active_jobs(ctx, [])
             raise
         set_pipeline_active_jobs(ctx, [])
-    if bool(getattr(args, "auto_report", True)):
-        report_limit = max(1, as_int(getattr(args, "report_workers", DEFAULT_REPORT_WORKERS), DEFAULT_REPORT_WORKERS))
+    report_limit_raw = as_int(getattr(args, "report_workers", DEFAULT_REPORT_WORKERS), DEFAULT_REPORT_WORKERS)
+    if bool(getattr(args, "auto_report", True)) and report_limit_raw > 0:
+        report_limit = report_limit_raw
         report_candidates = sorted(
             collect_cases_by_stage(ctx, {"confirmed"}),
             key=lambda item: str(item.get("last_repro_at", item.get("created_at", ""))),
@@ -5317,6 +5318,7 @@ def build_guest_init_launcher(root_dir: Path, banner: str) -> Path:
     source = textwrap.dedent(
         f"""\
 #define _GNU_SOURCE
+#include <grp.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/reboot.h>
@@ -5363,6 +5365,9 @@ int main(void)
 
     pid = fork();
     if (pid == 0) {{
+        (void)setgroups(0, NULL);
+        (void)setresgid(65534, 65534, 65534);
+        (void)setresuid(65534, 65534, 65534);
         execl("/bin/sh", "sh", "/poc/run.sh", (char *)NULL);
         execl("/bin/sh", "sh", (char *)NULL);
         perror("execl /bin/sh");
@@ -6879,7 +6884,8 @@ def run_auto_repro_case(ctx: KernelAuditContext, case_id: str, args: argparse.Na
             case_id=case_id,
             timeout=getattr(args, "repro_timeout", 240),
             jobs=getattr(args, "jobs", 0),
-            skip_build=getattr(args, "repro_skip_build", False),
+            # kCTF uses a vendored bzImage — skip rebuild unconditionally
+            skip_build=getattr(args, "repro_skip_build", False) or (ctx.target == "kctf"),
             rootfs_mode=case.get("repro_plan", {}).get("rootfs_mode", getattr(args, "rootfs_mode", "auto")),
             debian_suite=getattr(args, "debian_suite", "bookworm"),
             debian_mirror=getattr(args, "debian_mirror", "http://deb.debian.org/debian"),
@@ -6956,7 +6962,11 @@ def run_repro_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[s
             save_case(ctx, current)
             return case_id, False, str(exc)
 
-    parallel_repro = bool(getattr(args, "repro_skip_build", False)) and limit > 1
+    # kCTF uses a pre-built vendored bzImage — no rebuild is ever needed, so parallel
+    # QEMU repro workers are always safe regardless of --repro-skip-build.
+    kctf_skip_build = ctx.target == "kctf"
+    effective_skip_build = bool(getattr(args, "repro_skip_build", False)) or kctf_skip_build
+    parallel_repro = effective_skip_build and limit > 1
     if limit > 1 and not parallel_repro:
         print(
             "[kaudit] repro parallelism disabled because shared build tree rebuild is unsafe; "
@@ -6982,6 +6992,55 @@ def run_repro_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[s
             if confirmed:
                 confirmed_ids.append(case_id)
     return confirmed_ids
+
+
+def cmd_repro_cycle(ctx: KernelAuditContext, args: argparse.Namespace) -> int:
+    """Dedicated repro loop decoupled from discovery/verify.
+
+    Designed for kCTF where the bzImage is pre-built and never needs a rebuild,
+    so multiple QEMU repro workers can run in parallel immediately.
+    """
+    ctx.ensure_layout()
+    ensure_default_files(ctx)
+
+    # kCTF: skip build unconditionally; other targets respect --repro-skip-build
+    if ctx.target == "kctf":
+        args.repro_skip_build = True
+
+    once = getattr(args, "once", False) or not getattr(args, "loop", False)
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            pending = collect_cases_by_stage(ctx, {"repro_queued", "repro_failed"})
+            if not pending:
+                if once:
+                    print("[kaudit] repro-cycle: no pending cases")
+                    break
+                interval = max(1, as_int(getattr(args, "interval", 60), 60))
+                print(f"[kaudit] repro-cycle: no pending cases; sleeping {interval}s")
+                time.sleep(interval)
+                continue
+
+            print(f"[kaudit] repro-cycle iteration {iteration}: {len(pending)} candidate(s)")
+            confirmed_ids = run_repro_batch(ctx, args)
+            if confirmed_ids:
+                print(f"[kaudit] repro-cycle confirmed: {confirmed_ids}")
+                if getattr(args, "auto_report", True) and as_int(getattr(args, "report_workers", DEFAULT_REPORT_WORKERS), DEFAULT_REPORT_WORKERS) > 0:
+                    run_report_batch(ctx, args)
+
+            if once:
+                break
+            max_iter = getattr(args, "max_iterations", 0) or 0
+            if max_iter and iteration >= max_iter:
+                print("[kaudit] repro-cycle: reached max iterations")
+                break
+            interval = max(1, as_int(getattr(args, "interval", 60), 60))
+            print(f"[kaudit] repro-cycle sleeping {interval}s")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\n[kaudit] repro-cycle interrupted by user")
+    return 0
 
 
 def generate_disclosure_for_case(
@@ -7423,7 +7482,9 @@ def cmd_public_report_batch(ctx: KernelAuditContext, args: argparse.Namespace) -
 
 
 def run_report_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[str]:
-    limit = max(1, as_int(getattr(args, "report_workers", DEFAULT_REPORT_WORKERS), DEFAULT_REPORT_WORKERS))
+    limit = as_int(getattr(args, "report_workers", DEFAULT_REPORT_WORKERS), DEFAULT_REPORT_WORKERS)
+    if limit <= 0:
+        return []
     pending = sorted(
         collect_cases_by_stage(ctx, {"confirmed"}),
         key=lambda item: str(item.get("last_repro_at", item.get("created_at", ""))),
@@ -7922,6 +7983,48 @@ def build_parser() -> argparse.ArgumentParser:
     cycle.add_argument("--debian-include", default="busybox,ca-certificates")
     cycle.add_argument("--debian-force-cache", action="store_true")
 
+    repro_cycle = sub.add_parser("repro-cycle", help="drain repro/report backlog without running discovery")
+    add_target_option(repro_cycle)
+    repro_cycle.add_argument("--once", action="store_true", help="run exactly one repro backlog pass")
+    repro_cycle.add_argument("--loop", action="store_true", help="run continuous repro backlog passes")
+    repro_cycle.add_argument("--interval", type=int, default=60, help="loop sleep interval in seconds")
+    repro_cycle.add_argument("--max-iterations", type=int, default=0, help="max loop iterations (0 means infinite)")
+    repro_cycle.add_argument("--jobs", type=int, default=0, help="parallel build jobs if a rebuild is needed")
+    repro_cycle.add_argument("--repro-workers", type=int, default=DEFAULT_REPRO_WORKERS)
+    repro_cycle.add_argument("--report-workers", type=int, default=DEFAULT_REPORT_WORKERS)
+    repro_cycle.add_argument("--oldest-first", action="store_true", help="process backlog oldest-first")
+    repro_cycle.add_argument("--repro-timeout", type=int, default=240)
+    repro_cycle.add_argument("--repro-attempts", type=int, default=3)
+    repro_cycle.add_argument("--repro-skip-build", action="store_true")
+    repro_cycle.add_argument("--worker-model", default="", help="explicit Codex model for repro/report workers")
+    repro_cycle.add_argument(
+        "--worker-reasoning-effort",
+        choices=["low", "medium", "high", "xhigh"],
+        default=CODEX_WORKER_REASONING_DEFAULT,
+        help="reasoning effort for Codex repro/report workers",
+    )
+    repro_cycle.add_argument("--worker-timeout", type=int, default=CODEX_WORKER_TIMEOUT_DEFAULT)
+    repro_cycle.add_argument("--rootfs-mode", choices=["auto", "busybox", "debian"], default="auto")
+    repro_cycle.add_argument("--debian-suite", default="bookworm")
+    repro_cycle.add_argument("--debian-mirror", default="http://deb.debian.org/debian")
+    repro_cycle.add_argument("--debian-include", default="busybox,ca-certificates")
+    repro_cycle.add_argument("--debian-force-cache", action="store_true")
+    repro_cycle.add_argument("--auto-report", dest="auto_report", action="store_true", help="auto run report stage")
+    repro_cycle.add_argument("--no-auto-report", dest="auto_report", action="store_false", help="skip report stage")
+    repro_cycle.add_argument(
+        "--auto-public-report",
+        dest="auto_public_report",
+        action="store_true",
+        help="after internal report generation, also generate public-report artifacts",
+    )
+    repro_cycle.add_argument(
+        "--no-auto-public-report",
+        dest="auto_public_report",
+        action="store_false",
+        help="skip automatic public-report generation after internal report",
+    )
+    repro_cycle.set_defaults(auto_report=True, auto_public_report=True)
+
     verify = sub.add_parser("verify", help="deep root-cause verification for a case")
     verify.add_argument("case_id", help="case identifier")
     add_target_option(verify)
@@ -8019,6 +8122,36 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="recreate debian rootfs cache before repro",
     )
+
+    repro_cycle = sub.add_parser(
+        "repro-cycle",
+        help="dedicated repro loop decoupled from discovery (parallel QEMU workers; no build step for kCTF)",
+    )
+    add_target_option(repro_cycle)
+    repro_cycle.add_argument("--loop", action="store_true", default=False, help="loop until interrupted")
+    repro_cycle.add_argument("--once", action="store_true", default=False, help="run a single repro batch and exit")
+    repro_cycle.add_argument("--interval", type=int, default=60, help="seconds between repro-cycle loop iterations")
+    repro_cycle.add_argument("--max-iterations", type=int, default=0, help="stop after N iterations (0 = unlimited)")
+    repro_cycle.add_argument("--repro-workers", type=int, default=3, help="parallel QEMU repro workers (default 3 for kCTF)")
+    repro_cycle.add_argument("--repro-timeout", type=int, default=300, help="per-case QEMU timeout seconds")
+    repro_cycle.add_argument("--repro-attempts", type=int, default=3, help="max planner retry attempts per case")
+    repro_cycle.add_argument("--repro-skip-build", action="store_true", help="skip kernel rebuild (always on for kCTF)")
+    repro_cycle.add_argument("--worker-model", default="", help="explicit Codex model for repro planner worker")
+    repro_cycle.add_argument(
+        "--worker-reasoning-effort",
+        choices=["low", "medium", "high", "xhigh"],
+        default=CODEX_WORKER_REASONING_DEFAULT,
+    )
+    repro_cycle.add_argument("--worker-timeout", type=int, default=CODEX_WORKER_TIMEOUT_DEFAULT)
+    repro_cycle.add_argument("--rootfs-mode", choices=["auto", "busybox", "debian"], default="auto")
+    repro_cycle.add_argument("--debian-suite", default="bookworm")
+    repro_cycle.add_argument("--debian-mirror", default="http://deb.debian.org/debian")
+    repro_cycle.add_argument("--debian-include", default="busybox,ca-certificates")
+    repro_cycle.add_argument("--debian-force-cache", action="store_true")
+    repro_cycle.add_argument("--auto-report", dest="auto_report", action="store_true", default=True, help="auto-generate report for confirmed cases")
+    repro_cycle.add_argument("--no-auto-report", dest="auto_report", action="store_false")
+    repro_cycle.add_argument("--report-workers", type=int, default=DEFAULT_REPORT_WORKERS)
+    repro_cycle.add_argument("--oldest-first", action="store_true", help="process oldest queued cases first")
 
     rootfs = sub.add_parser("rootfs", help="rootfs preparation and cache controls")
     rootfs_sub = rootfs.add_subparsers(dest="rootfs_cmd", required=True)
@@ -8162,6 +8295,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_case_backfill(ctx, args)
         if args.command == "repro":
             return cmd_repro(ctx, args)
+        if args.command == "repro-cycle":
+            return cmd_repro_cycle(ctx, args)
         if args.command == "rootfs" and args.rootfs_cmd == "prepare":
             return cmd_rootfs_prepare(ctx, args)
         if args.command == "report":

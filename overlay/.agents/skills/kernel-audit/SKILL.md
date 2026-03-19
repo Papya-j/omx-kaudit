@@ -64,6 +64,7 @@ Details:
 - `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target fs`
 - `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target net`
 - `./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch team --target kctf`
+- `./.omx/kernel-audit/bin/kaudit repro-cycle --loop --target kctf`
 - `./.omx/kernel-audit/bin/kaudit verify <case-id>`
 - `./.omx/kernel-audit/bin/kaudit rootfs prepare --mode auto`
 - `./.omx/kernel-audit/bin/kaudit repro <case-id> --rootfs-mode auto`
@@ -169,6 +170,9 @@ Every final report/email draft must include:
 - Treat low-confidence discovery output as triage input, not as a confirmed bug.
 - Prefer `xhigh` worker reasoning for kernel-fs analysis.
 - `kctf` discovery first builds the target-local Lakitu-based `bzImage` and prunes config-dead code before shard selection.
+- For `kctf`, the intended split is:
+  discovery loop: `cycle --no-auto-repro --no-auto-report`
+  repro/report loop: `repro-cycle --loop --target kctf --repro-workers N`
 - If auto repro cannot be self-contained in QEMU, mark the case `manual_only` and record why.
 - If a human chooses to override `manual_only`, require an explicit recorded reason via `kaudit case promote <case-id> --to repro_queued --reason ...`.
 - If KASAN does not fire, do not mark the case `confirmed`.

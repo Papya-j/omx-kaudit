@@ -158,6 +158,27 @@ For the `kctf` target, use a `6.12.x` kernel tree and build the target-local Lak
 ./.omx/kernel-audit/bin/kaudit build init --target kctf --jobs $(nproc)
 ```
 
+For split discovery/repro operation on `kctf`, use:
+
+```bash
+./.omx/kernel-audit/bin/kaudit cycle --loop --dispatch local --no-preflight --target kctf \
+  --worker-reasoning-effort xhigh \
+  --audit-workers 3 \
+  --verify-workers 2 \
+  --no-auto-repro \
+  --no-auto-report \
+  --interval 120
+```
+
+```bash
+./.omx/kernel-audit/bin/kaudit repro-cycle --loop --target kctf \
+  --repro-workers 3 \
+  --repro-timeout 300 \
+  --repro-attempts 3 \
+  --worker-reasoning-effort xhigh \
+  --interval 60
+```
+
 ## Recommended tmux Workflow
 
 `tmux` is strongly recommended for long-running campaigns.
