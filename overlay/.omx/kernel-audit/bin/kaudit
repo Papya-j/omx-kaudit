@@ -6821,6 +6821,57 @@ def extract_repro_feedback(case: Dict[str, Any]) -> str:
     return json.dumps(repro_result, indent=2, sort_keys=True)
 
 
+def summarize_repro_case_outcome(case: Dict[str, Any]) -> str:
+    case = normalize_case(case)
+    stage = str(case.get("stage", "") or "")
+    repro_result = case.get("repro_result", {}) if isinstance(case.get("repro_result"), dict) else {}
+    last_attempt = None
+    attempts = case.get("repro_attempts", []) if isinstance(case.get("repro_attempts"), list) else []
+    if attempts:
+        last_attempt = attempts[-1] if isinstance(attempts[-1], dict) else None
+
+    if stage == "confirmed":
+        qemu_log = str(case.get("qemu_log", "") or "")
+        return (
+            f"confirmed: KASAN detected"
+            + (f"; qemu_log={qemu_log}" if qemu_log else "")
+        )
+
+    if stage == "manual_only":
+        reason = str(case.get("verification", {}).get("manual_constraints", "") or "").strip()
+        if not reason and last_attempt:
+            reason = str(last_attempt.get("manual_constraints", "") or "").strip()
+        return f"manual_only: {reason or 'planner marked this case as requiring manual handling'}"
+
+    if stage == "repro_failed":
+        if last_attempt:
+            planner_error = str(last_attempt.get("planner_error", "") or "").strip()
+            if planner_error:
+                return f"repro_failed: {planner_error}"
+            cmd_repro_rc = last_attempt.get("cmd_repro_rc")
+            timed_out = last_attempt.get("timed_out")
+            kasan = bool(last_attempt.get("kasan_detected", False))
+            qemu_log = str(last_attempt.get("qemu_log", "") or "")
+            parts = []
+            if cmd_repro_rc is not None:
+                parts.append(f"cmd_repro_rc={cmd_repro_rc}")
+            if timed_out is not None:
+                parts.append(f"timed_out={timed_out}")
+            parts.append(f"kasan_detected={kasan}")
+            if qemu_log:
+                parts.append(f"qemu_log={qemu_log}")
+            if parts:
+                return "repro_failed: " + ", ".join(parts)
+        if repro_result:
+            return (
+                "repro_failed: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(repro_result.items()))
+            )
+        return "repro_failed: no detailed repro result recorded"
+
+    return f"{stage or 'unknown'}"
+
+
 def repro_requires_manual_validation(case: Dict[str, Any]) -> str:
     verification = case.get("verification", {}) if isinstance(case.get("verification"), dict) else {}
     haystacks = [
@@ -6999,6 +7050,11 @@ def run_repro_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[s
                 if error:
                     print(f"[kaudit] repro worker failed for {case_id}: {error}")
                     continue
+                try:
+                    case = ensure_case_exists(ctx, case_id)
+                    print(f"[kaudit] repro result for {case_id}: {summarize_repro_case_outcome(case)}")
+                except Exception as exc:
+                    print(f"[kaudit] repro result for {case_id}: unable to summarize ({exc})")
                 if confirmed:
                     confirmed_ids.append(case_id)
     else:
@@ -7007,6 +7063,11 @@ def run_repro_batch(ctx: KernelAuditContext, args: argparse.Namespace) -> List[s
             if error:
                 print(f"[kaudit] repro worker failed for {case_id}: {error}")
                 continue
+            try:
+                current = ensure_case_exists(ctx, case_id)
+                print(f"[kaudit] repro result for {case_id}: {summarize_repro_case_outcome(current)}")
+            except Exception as exc:
+                print(f"[kaudit] repro result for {case_id}: unable to summarize ({exc})")
             if confirmed:
                 confirmed_ids.append(case_id)
     return confirmed_ids
