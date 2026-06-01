@@ -241,6 +241,7 @@ After installation, the target kernel tree contains:
 <linux-tree>/
   .agents/skills/kernel-audit/
   .codex/prompts/kernel-fs-*.md
+  .codex/prompts/kernel-net-*.md
   .codex/prompts/kernel-kctf-*.md
   .omx/kernel-audit/
     bin/kaudit
@@ -596,8 +597,20 @@ It refreshes:
 - `.omx/kernel-audit/README.md`
 - `.agents/skills/kernel-audit/SKILL.md`
 - `.codex/prompts/kernel-fs-*.md`
+- `.codex/prompts/kernel-net-*.md`
+- `.codex/prompts/kernel-kctf-*.md`
 
 It intentionally excludes runtime outputs and discovered cases.
+
+## Validate The Overlay
+
+Before publishing changes, run the local overlay contract harness:
+
+```bash
+./scripts/validate-overlay.sh
+```
+
+It checks shell syntax, Python syntax, JSON templates, `kaudit` help surfaces, the unique subcommand registry, common worker contract, team-preflight command construction, and install/uninstall round-trips.
 
 ## Publish
 

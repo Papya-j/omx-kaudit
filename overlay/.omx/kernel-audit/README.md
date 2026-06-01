@@ -31,6 +31,17 @@ The analysis authority is Codex. External sources are intake only.
 
 This stage is short-lived. The team is started, preflight artifacts are produced, and the team is cleaned up.
 
+### Worker Evidence Contract
+
+Every Codex worker prompt gets a shared contract before task context:
+
+- claims must come from repository source, case JSON, local logs, or provided knowledge paths
+- missing proof links fail closed instead of being papered over
+- discovery returns no candidates when reachability is not proven
+- verification uses `reject` or `manual_only` instead of `repro_ready` when evidence is incomplete
+- repro planning sets `supported=false` with explicit `manual_constraints` when QEMU automation is not justified
+- disclosure summarizes only verified facts and must not invent KASAN text or command output
+
 ### Stage 2: Discovery
 
 Discovery is no longer just regex candidate mining.

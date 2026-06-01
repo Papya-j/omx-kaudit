@@ -73,8 +73,8 @@ Details:
 - `./.omx/kernel-audit/bin/kaudit pre-disclose-batch --stages reported --refresh`
 - `./.omx/kernel-audit/bin/kaudit status`
 - `./.omx/kernel-audit/bin/kaudit case show <case-id>`
-- `./.omx/kernel-audit/bin/kaudit case note <case-id> "operator context"`
-- `./.omx/kernel-audit/bin/kaudit case promote <case-id> --to repro_queued`
+- `./.omx/kernel-audit/bin/kaudit case note <case-id> --message "operator context"`
+- `./.omx/kernel-audit/bin/kaudit case promote <case-id> --to repro_queued --reason "operator-approved manual override"`
 - `./.omx/kernel-audit/bin/kaudit case backfill`
 </Commands>
 

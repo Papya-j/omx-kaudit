@@ -229,6 +229,18 @@ VERIFY_SCHEMA_NAME = "verify-worker.schema.json"
 REPRO_SCHEMA_NAME = "repro-worker.schema.json"
 DISCLOSURE_SCHEMA_NAME = "disclosure-worker.schema.json"
 
+COMMON_WORKER_CONTRACT = """\
+- Base every claim on repository source, provided case JSON, local logs, or provided knowledge paths.
+- Distinguish direct evidence from inference; do not fill gaps with plausible-sounding facts.
+- Do not invent source paths, line numbers, configs, maintainer addresses, KASAN text, or command output.
+- Fail closed when a required proof link is missing:
+  - discovery: return an empty candidates list.
+  - verify: use reject or manual_only instead of repro_ready.
+  - repro-plan: set supported=false and explain manual_constraints.
+  - disclosure: summarize only verified facts and state uncertainty plainly.
+- Return JSON matching the provided schema only.
+"""
+
 TEAM_PHASE_DONE = {"complete", "failed", "cancelled"}
 
 OMX_GITHUB_RELEASE_API = "https://api.github.com/repos/Yeachan-Heo/oh-my-codex/releases/latest"
@@ -657,6 +669,10 @@ def parse_json_output_loose(raw: str) -> Optional[Dict[str, Any]]:
     if start >= 0 and end > start:
         return parse_json_output(text[start : end + 1])
     return None
+
+
+def worker_common_contract(stage: str) -> str:
+    return f"## Common Worker Contract ({stage})\n{COMMON_WORKER_CONTRACT.strip()}\n"
 
 
 def as_int(value: Any, default: int = 0) -> int:
@@ -3680,6 +3696,8 @@ def run_codex_worker_json(
     prompt_body = prompt_path.read_text(encoding="utf-8").strip()
     full_prompt = (
         prompt_body
+        + "\n\n"
+        + worker_common_contract(stage)
         + "\n\n## Task Context\n```json\n"
         + json.dumps(payload, indent=2, sort_keys=True)
         + "\n```\n"
@@ -3993,7 +4011,7 @@ def discover_cases_once(
                 continue
 
             info["last_error"] = ""
-            info["last_worker_status"] = str(result.get("summary", "") or "")
+            info["last_worker_status"] = str(result.get("worker_summary", "") or result.get("summary", "") or "")
             raw_candidates = result.get("candidates", [])
             if not isinstance(raw_candidates, list):
                 raw_candidates = []
@@ -4748,9 +4766,9 @@ def team_preflight_task(ctx: KernelAuditContext, jobs: int, target: str) -> str:
     # Numbered task format makes omx team decomposition deterministic.
     return textwrap.dedent(
         f"""\
-        1. In {ctx.repo_root}, run `./.omx/kernel-audit/bin/kernel-audit refresh --syzbot --cve`.
-        2. In {ctx.repo_root}, run `./.omx/kernel-audit/bin/kernel-audit build init --jobs {jobs}`.
-        3. In {ctx.repo_root}, run `./.omx/kernel-audit/bin/kernel-audit status` and verify knowledge snapshot + bzImage are present for target `{target}` campaign.
+        1. In {ctx.repo_root}, run `./.omx/kernel-audit/bin/kaudit refresh --target {target} --syzbot --cve`.
+        2. In {ctx.repo_root}, run `./.omx/kernel-audit/bin/kaudit build init --target {target} --jobs {jobs}`.
+        3. In {ctx.repo_root}, run `./.omx/kernel-audit/bin/kaudit status --target {target}` and verify knowledge snapshot + bzImage are present for target `{target}` campaign.
         """
     ).strip()
 
@@ -8245,48 +8263,6 @@ def build_parser() -> argparse.ArgumentParser:
     cycle.add_argument("--debian-include", default="busybox,ca-certificates")
     cycle.add_argument("--debian-force-cache", action="store_true")
 
-    repro_cycle = sub.add_parser("repro-cycle", help="drain repro/report backlog without running discovery")
-    add_target_option(repro_cycle)
-    repro_cycle.add_argument("--once", action="store_true", help="run exactly one repro backlog pass")
-    repro_cycle.add_argument("--loop", action="store_true", help="run continuous repro backlog passes")
-    repro_cycle.add_argument("--interval", type=int, default=60, help="loop sleep interval in seconds")
-    repro_cycle.add_argument("--max-iterations", type=int, default=0, help="max loop iterations (0 means infinite)")
-    repro_cycle.add_argument("--jobs", type=int, default=0, help="parallel build jobs if a rebuild is needed")
-    repro_cycle.add_argument("--repro-workers", type=int, default=DEFAULT_REPRO_WORKERS)
-    repro_cycle.add_argument("--report-workers", type=int, default=DEFAULT_REPORT_WORKERS)
-    repro_cycle.add_argument("--oldest-first", action="store_true", help="process backlog oldest-first")
-    repro_cycle.add_argument("--repro-timeout", type=int, default=240)
-    repro_cycle.add_argument("--repro-attempts", type=int, default=3)
-    repro_cycle.add_argument("--repro-skip-build", action="store_true")
-    repro_cycle.add_argument("--worker-model", default="", help="explicit Codex model for repro/report workers")
-    repro_cycle.add_argument(
-        "--worker-reasoning-effort",
-        choices=["low", "medium", "high", "xhigh"],
-        default=CODEX_WORKER_REASONING_DEFAULT,
-        help="reasoning effort for Codex repro/report workers",
-    )
-    repro_cycle.add_argument("--worker-timeout", type=int, default=CODEX_WORKER_TIMEOUT_DEFAULT)
-    repro_cycle.add_argument("--rootfs-mode", choices=["auto", "busybox", "debian"], default="auto")
-    repro_cycle.add_argument("--debian-suite", default="bookworm")
-    repro_cycle.add_argument("--debian-mirror", default="http://deb.debian.org/debian")
-    repro_cycle.add_argument("--debian-include", default="busybox,ca-certificates")
-    repro_cycle.add_argument("--debian-force-cache", action="store_true")
-    repro_cycle.add_argument("--auto-report", dest="auto_report", action="store_true", help="auto run report stage")
-    repro_cycle.add_argument("--no-auto-report", dest="auto_report", action="store_false", help="skip report stage")
-    repro_cycle.add_argument(
-        "--auto-public-report",
-        dest="auto_public_report",
-        action="store_true",
-        help="after internal report generation, also generate public-report artifacts",
-    )
-    repro_cycle.add_argument(
-        "--no-auto-public-report",
-        dest="auto_public_report",
-        action="store_false",
-        help="skip automatic public-report generation after internal report",
-    )
-    repro_cycle.set_defaults(auto_report=True, auto_public_report=True)
-
     verify = sub.add_parser("verify", help="deep root-cause verification for a case")
     verify.add_argument("case_id", help="case identifier")
     add_target_option(verify)
@@ -8394,6 +8370,7 @@ def build_parser() -> argparse.ArgumentParser:
     repro_cycle.add_argument("--once", action="store_true", default=False, help="run a single repro batch and exit")
     repro_cycle.add_argument("--interval", type=int, default=60, help="seconds between repro-cycle loop iterations")
     repro_cycle.add_argument("--max-iterations", type=int, default=0, help="stop after N iterations (0 = unlimited)")
+    repro_cycle.add_argument("--jobs", type=int, default=0, help="parallel build jobs if a rebuild is needed")
     repro_cycle.add_argument("--repro-workers", type=int, default=3, help="parallel QEMU repro workers (default 3 for kCTF)")
     repro_cycle.add_argument("--repro-timeout", type=int, default=300, help="per-case QEMU timeout seconds")
     repro_cycle.add_argument("--repro-attempts", type=int, default=3, help="max planner retry attempts per case")
@@ -8410,8 +8387,21 @@ def build_parser() -> argparse.ArgumentParser:
     repro_cycle.add_argument("--debian-mirror", default="http://deb.debian.org/debian")
     repro_cycle.add_argument("--debian-include", default="busybox,ca-certificates")
     repro_cycle.add_argument("--debian-force-cache", action="store_true")
-    repro_cycle.add_argument("--auto-report", dest="auto_report", action="store_true", default=True, help="auto-generate report for confirmed cases")
+    repro_cycle.add_argument("--auto-report", dest="auto_report", action="store_true", help="auto-generate report for confirmed cases")
     repro_cycle.add_argument("--no-auto-report", dest="auto_report", action="store_false")
+    repro_cycle.add_argument(
+        "--auto-public-report",
+        dest="auto_public_report",
+        action="store_true",
+        help="after internal report generation, also generate public-report artifacts",
+    )
+    repro_cycle.add_argument(
+        "--no-auto-public-report",
+        dest="auto_public_report",
+        action="store_false",
+        help="skip automatic public-report generation after internal report",
+    )
+    repro_cycle.set_defaults(auto_report=True, auto_public_report=True)
     repro_cycle.add_argument("--report-workers", type=int, default=DEFAULT_REPORT_WORKERS)
     repro_cycle.add_argument("--oldest-first", action="store_true", help="process oldest queued cases first")
 
