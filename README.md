@@ -1,6 +1,7 @@
 # OMX Kernel Audit Overlay
 
 `omx-kernel-audit-overlay` is a standalone overlay repository for running the `kaudit` Linux kernel subsystem audit workflow on top of an existing Linux kernel tree.
+It is built on [Oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex), using its project-scoped Codex setup, skills, prompts, and team-aware orchestration surfaces to make long-running kernel audits repeatable.
 Current built-in target profiles are:
 
 - `fs` (legacy default)
